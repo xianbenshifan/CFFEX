@@ -1,0 +1,681 @@
+"""
+HTTP代理服务器
+监听东方财富答题API，自动搜题并返回答案
+"""
+# -*- coding: utf-8 -*-
+import json
+import os
+import sys
+import logging
+import re
+import threading
+from typing import Dict, Any, Optional
+from flask import Flask, request, jsonify, Response
+import requests
+from flask_cors import CORS
+
+# 修复Windows控制台编码问题
+if sys.platform == 'win32':
+    try:
+        # 设置控制台代码页为UTF-8
+        import subprocess
+        subprocess.run(['chcp', '65001'], shell=True, capture_output=True, check=False)
+    except:
+        pass
+    
+    # 重新配置标准输出流
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except:
+            pass
+    if hasattr(sys.stderr, 'reconfigure'):
+        try:
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except:
+            pass
+    
+    # 设置环境变量
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+
+# 导入搜题模块
+from semantic_search import (
+    load_database,
+    build_or_load_embeddings,
+    search_questions,
+    prepare_model_precision,
+    SentenceTransformer,
+    DATABASE_PATH,
+    MODEL_DIR,
+    DEVICE,
+    TOP_K_DEFAULT,
+)
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# 确保日志处理器使用UTF-8编码
+for handler in logger.handlers:
+    if hasattr(handler, 'stream') and hasattr(handler.stream, 'reconfigure'):
+        try:
+            handler.stream.reconfigure(encoding='utf-8', errors='replace')
+        except:
+            pass
+
+app = Flask(__name__)
+CORS(app)
+
+# 目标API基础URL
+TARGET_HOST = "quiz-activity.eastmoney.com"
+TARGET_BASE = f"https://{TARGET_HOST}"
+
+# 需要特殊处理的路径（只处理这些路径，其他路径直接转发）
+SPECIAL_PATHS = [
+    'health',
+    'cache',
+    'proxy_info'
+]
+
+# 全局变量
+_model: Optional[SentenceTransformer] = None
+_database: Optional[list] = None
+_embeddings = None
+_meta: Optional[list] = None
+
+# 题目缓存（questionId -> 答案）
+_question_cache: Dict[int, Dict[str, Any]] = {}
+
+
+def init_search_engine():
+    """初始化搜题引擎"""
+    global _model, _database, _embeddings, _meta
+    
+    try:
+        logger.info("正在初始化搜题引擎...")
+        _database = load_database(DATABASE_PATH)
+        logger.info(f"题库加载完成，共 {len(_database)} 道题")
+        
+        _model = SentenceTransformer(MODEL_DIR, device=DEVICE)
+        prepare_model_precision(_model)
+        logger.info("模型加载完成")
+        
+        _embeddings, _meta = build_or_load_embeddings(_database, _model)
+        logger.info(f"向量加载完成，共 {len(_meta)} 个向量")
+        
+        logger.info("搜题引擎初始化完成！")
+        return True
+    except Exception as e:
+        logger.error(f"初始化失败: {e}", exc_info=True)
+        return False
+
+
+def extract_question_text(question_data: Dict[str, Any]) -> str:
+    """从API响应中提取题目文本"""
+    question_text = question_data.get("question", "").strip()
+    
+    # 提取选项
+    options = question_data.get("options", [])
+    if isinstance(options, list):
+        option_texts = []
+        for i, opt in enumerate(options):
+            if isinstance(opt, dict):
+                option_texts.append(f"{opt.get('label', chr(65+i))}. {opt.get('content', '')}")
+            elif isinstance(opt, str):
+                option_texts.append(f"{chr(65+i)}. {opt}")
+        if option_texts:
+            question_text += " " + " ".join(option_texts)
+    elif isinstance(options, dict):
+        option_texts = []
+        for k, v in sorted(options.items()):
+            option_texts.append(f"{k}. {v}")
+        if option_texts:
+            question_text += " " + " ".join(option_texts)
+    
+    return question_text
+
+
+def search_answer(question_text: str, top_k: int = 3) -> Optional[Dict[str, Any]]:
+    """搜索题目答案"""
+    if _model is None or _database is None or _embeddings is None:
+        return None
+    
+    try:
+        results = search_questions(
+            query=question_text,
+            db=_database,
+            embeddings=_embeddings,
+            meta=_meta,
+            model=_model,
+            top_k=top_k
+        )
+        
+        if not results:
+            return None
+        
+        # 返回最佳匹配
+        best_match = results[0]
+        q, sim = best_match
+        
+        return {
+            "question": q.get("question", ""),
+            "answer": q.get("answer", ""),
+            "similarity": round(float(sim), 4),
+            "all_results": [
+                {
+                    "number": item[0].get("number"),
+                    "question": item[0].get("question", ""),
+                    "answer": item[0].get("answer", ""),
+                    "options": item[0].get("options", {}),
+                    "similarity": round(float(item[1]), 4)
+                }
+                for item in results[:top_k]
+            ]
+        }
+    except Exception as e:
+        logger.error(f"搜题失败: {e}", exc_info=True)
+        return None
+
+
+def find_answer_index(answer_text: str, options: list) -> Optional[int]:
+    """根据答案文本找到选项索引（0-based）"""
+    if not options:
+        return None
+    
+    # 清理答案文本
+    answer_clean = answer_text.strip().upper()
+    
+    # 尝试直接匹配选项标签（单个字母）
+    if len(answer_clean) == 1 and answer_clean in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        idx = ord(answer_clean) - ord('A')
+        if 0 <= idx < len(options):
+            return idx
+    
+    # 尝试匹配选项内容
+    for i, opt in enumerate(options):
+        if isinstance(opt, dict):
+            opt_label = str(opt.get("label", "")).strip().upper()
+            opt_content = str(opt.get("content", "")).strip()
+            # 匹配标签
+            if opt_label == answer_clean:
+                return i
+            # 匹配内容（包含关系）
+            if answer_clean and answer_clean in opt_content.upper():
+                return i
+            # 如果选项内容就是答案文本
+            if opt_content.upper() == answer_clean:
+                return i
+        elif isinstance(opt, str):
+            opt_upper = opt.upper()
+            if answer_clean in opt_upper or opt_upper == answer_clean:
+                return i
+    
+    # 如果答案是多选（如"ABCD"），返回第一个有效选项
+    if len(answer_clean) > 1:
+        for char in answer_clean:
+            if char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                idx = ord(char) - ord('A')
+                if 0 <= idx < len(options):
+                    return idx
+    
+    return None
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """健康检查"""
+    if _model is None:
+        return jsonify({"status": "not_ready"}), 503
+    return jsonify({
+        "status": "ready",
+        "cache_size": len(_question_cache)
+    })
+
+
+@app.route('/qa/api/quiz/<path:quiz_id>', methods=['GET'])
+def receive_quiz_only(quiz_id: str):
+    """只接收题目数据包，不发送响应（镜像模式）"""
+    try:
+        # 获取请求数据
+        query_params = request.query_string.decode('utf-8')
+        logger.info(f"[接收题目] 题目ID: {quiz_id}, 参数: {query_params}")
+        logger.info(f"[接收题目] 请求来源: {request.remote_addr}")
+        
+        # 尝试从请求体或查询参数中获取题目数据
+        # 如果Charles转发的是响应数据，可能在请求体中
+        question_data = None
+        
+        # 方法1: 从请求体获取（如果Charles转发响应）
+        if request.data:
+            try:
+                question_data = request.get_json()
+                logger.info(f"[接收题目] 从请求体获取数据")
+            except:
+                pass
+        
+        # 方法2: 如果没有数据，说明这只是通知，需要从真实服务器获取
+        # 但用户说不需要Flask发送，所以这里只记录
+        if not question_data:
+            logger.info(f"[接收题目] 收到题目请求通知，等待Charles转发响应数据...")
+            # 返回简单确认，不阻塞
+            return jsonify({"status": "received", "message": "题目请求已接收，等待响应数据"}), 200
+        
+        # 如果有题目数据，进行搜题
+        if isinstance(question_data, dict):
+            data = question_data.get("data", question_data)
+            question_id = data.get("questionId") or data.get("id")
+            question_text = extract_question_text(data)
+            
+            if question_text and question_id:
+                logger.info(f"[接收题目] 检测到题目 ID={question_id}, 文本: {question_text[:50]}...")
+                
+                # 使用线程异步搜题
+                def search_in_background():
+                    try:
+                        answer_info = search_answer(question_text)
+                        if answer_info:
+                            logger.info(f"[搜题结果] 找到答案: {answer_info['answer']}, 相似度: {answer_info['similarity']}")
+                            
+                            # 缓存答案
+                            _question_cache[question_id] = {
+                                "question_text": question_text,
+                                "answer": answer_info["answer"],
+                                "similarity": answer_info["similarity"],
+                                "all_results": answer_info.get("all_results", [])
+                            }
+                            
+                            # 尝试找到选项索引
+                            options = data.get("options", [])
+                            answer_index = find_answer_index(answer_info["answer"], options)
+                            
+                            if answer_index is not None:
+                                logger.info(f"[搜题结果] 答案索引: {answer_index} (选项: {chr(65+answer_index)})")
+                                _question_cache[question_id]["answer_index"] = answer_index
+                            
+                            # 在控制台输出答案信息
+                            logger.info("")
+                            logger.info("=" * 80)
+                            logger.info(f"题目ID: {question_id}")
+                            logger.info("-" * 80)
+                            logger.info(f"题目: {question_text}")
+                            logger.info("")
+                            logger.info("【最匹配的3个结果】")
+                            logger.info("-" * 80)
+                            all_results = answer_info.get("all_results", [])
+                            for i, result in enumerate(all_results[:3], 1):
+                                question_text_result = result.get('question', '')
+                                answer_text = result.get('answer', 'N/A')
+                                similarity = result.get('similarity', 0)
+                                number = result.get('number', 'N/A')
+                                options = result.get('options', {})
+                                
+                                logger.info(f"结果 {i}: 题号 {number} | 相似度: {similarity:.4f}")
+                                logger.info(f"  题目: {question_text_result}")
+                                if options:
+                                    logger.info("  选项:")
+                                    for opt_key in sorted(options.keys()):
+                                        logger.info(f"    {opt_key}. {options[opt_key]}")
+                                logger.info(f"  答案: {answer_text}")
+                                if i < len(all_results[:3]):
+                                    logger.info("-" * 80)
+                            
+                            logger.info("")
+                            logger.info("【推荐答案】")
+                            logger.info(f"  答案: {answer_info['answer']}")
+                            logger.info(f"  相似度: {answer_info['similarity']:.4f}")
+                            if answer_index is not None:
+                                logger.info(f"  选项索引: {answer_index} ({chr(65+answer_index)})")
+                            logger.info("=" * 80)
+                            logger.info("")
+                        else:
+                            logger.warning(f"[搜题结果] 未找到答案: {question_id}")
+                    except Exception as e:
+                        logger.error(f"[搜题错误] {e}", exc_info=True)
+                
+                # 启动后台线程搜题
+                thread = threading.Thread(target=search_in_background, daemon=True)
+                thread.start()
+        
+        # 返回简单确认（不返回实际数据，因为Charles会处理）
+        return jsonify({"status": "received", "message": "题目数据已接收，正在搜题"}), 200
+        
+    except Exception as e:
+        logger.error(f"[接收题目错误] {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 200  # 即使出错也返回200，不影响Charles
+
+
+# 注意：通配符路由必须放在最后，确保特定路由优先匹配
+@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'CONNECT'])
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'CONNECT'])
+def proxy_all(path):
+    """代理所有其他请求（转发到原始服务器）"""
+    try:
+        # 处理CONNECT请求（HTTPS隧道）
+        if request.method == 'CONNECT':
+            logger.warning("=" * 60)
+            logger.warning("收到CONNECT请求（HTTPS隧道）")
+            logger.warning("Flask无法直接处理CONNECT请求")
+            logger.warning("")
+            logger.warning("解决方案：")
+            logger.warning("1. 使用Charles/Fiddler处理CONNECT请求")
+            logger.warning("2. 在Charles中配置Map Remote，将请求转发到此服务")
+            logger.warning("3. 手机配置代理指向Charles（不是直接指向此服务）")
+            logger.warning("=" * 60)
+            return jsonify({
+                "error": "CONNECT method not supported",
+                "message": "此服务不支持CONNECT请求。请使用Charles/Fiddler处理HTTPS，然后转发HTTP请求到此服务。",
+                "solution": "配置Charles Map Remote: https://quiz-activity.eastmoney.com/qa/api/quiz/* -> http://localhost:8889/qa/api/quiz/*"
+            }), 501
+        
+        # 检查是否是特殊路径（已由其他路由处理）
+        for special in SPECIAL_PATHS:
+            if path.startswith(special.strip('/')):
+                # 让Flask继续处理其他路由
+                from flask import abort
+                abort(404)
+        
+        # 判断目标服务器
+        host_header = request.headers.get('Host', '')
+        
+        # 如果Host是quiz-activity.eastmoney.com，转发到HTTPS
+        if 'quiz-activity.eastmoney.com' in host_header:
+            target_base = f"https://quiz-activity.eastmoney.com"
+        elif host_header:
+            # 对于其他请求，默认使用HTTP（因为通过HTTP代理访问）
+            # 如果原始请求是HTTPS，可能需要特殊处理
+            target_base = f"http://{host_header}"
+        else:
+            # 如果没有Host头，尝试从请求URL推断
+            if 'quiz-activity.eastmoney.com' in request.url:
+                target_base = f"https://quiz-activity.eastmoney.com"
+            else:
+                # 无法确定目标，返回错误
+                logger.warning(f"无法确定目标服务器: Host={host_header}, URL={request.url}")
+                return jsonify({"error": "Cannot determine target server"}), 400
+        
+        # 构建目标URL
+        query_params = request.query_string.decode('utf-8')
+        if path:
+            target_url = f"{target_base}/{path}"
+        else:
+            target_url = target_base
+        if query_params:
+            target_url += f"?{query_params}"
+        
+        logger.debug(f"转发请求: {request.method} {target_url}")
+        
+        # 复制请求头
+        headers = {}
+        for key, value in request.headers:
+            key_lower = key.lower()
+            if key_lower not in ['host', 'content-length', 'connection', 'proxy-connection']:
+                headers[key] = value
+        
+        # 根据请求方法转发
+        try:
+            if request.method == 'GET':
+                response = requests.get(target_url, headers=headers, timeout=10, verify=False, allow_redirects=True)
+            elif request.method == 'POST':
+                data = request.get_data()
+                content_type = request.headers.get('Content-Type', '')
+                if 'application/json' in content_type:
+                    import json as json_lib
+                    try:
+                        json_data = json_lib.loads(data)
+                        response = requests.post(target_url, json=json_data, headers=headers, timeout=10, verify=False)
+                    except:
+                        response = requests.post(target_url, data=data, headers=headers, timeout=10, verify=False)
+                else:
+                    response = requests.post(target_url, data=data, headers=headers, timeout=10, verify=False)
+            elif request.method == 'PUT':
+                data = request.get_data()
+                response = requests.put(target_url, data=data, headers=headers, timeout=10, verify=False)
+            elif request.method == 'DELETE':
+                response = requests.delete(target_url, headers=headers, timeout=10, verify=False)
+            elif request.method == 'PATCH':
+                data = request.get_data()
+                response = requests.patch(target_url, data=data, headers=headers, timeout=10, verify=False)
+            elif request.method == 'OPTIONS':
+                response = requests.options(target_url, headers=headers, timeout=10, verify=False)
+            else:
+                return jsonify({"error": "Method not allowed"}), 405
+        except requests.exceptions.SSLError as e:
+            logger.error(f"SSL错误: {e}，尝试使用HTTP")
+            # 如果HTTPS失败，尝试HTTP
+            if target_url.startswith('https://'):
+                target_url = target_url.replace('https://', 'http://')
+                response = requests.get(target_url, headers=headers, timeout=10, allow_redirects=True)
+            else:
+                raise
+        
+        # 返回响应
+        return Response(
+            response.content,
+            status=response.status_code,
+            headers=dict(response.headers),
+            mimetype=response.headers.get('Content-Type', 'application/json')
+        )
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"代理请求失败: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"代理请求异常: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/qa/api/quiz/answer', methods=['POST'])
+def receive_answer_only():
+    """只接收答题数据包，不发送响应（镜像模式）"""
+    try:
+        # 获取请求数据
+        request_data = request.get_json() or {}
+        question_id = request_data.get("questionId")
+        answer_index = request_data.get("answerIndex")
+        quiz_id = request_data.get("quizId")
+        
+        logger.info(f"[接收答案] questionId={question_id}, answerIndex={answer_index}, quizId={quiz_id}")
+        logger.info(f"[接收答案] 请求来源: {request.remote_addr}")
+        
+        # 检查缓存中是否有答案（仅用于日志显示）
+        if question_id and question_id in _question_cache:
+            cache_info = _question_cache[question_id]
+            correct_answer = cache_info.get('answer', 'N/A')
+            similarity = cache_info.get('similarity', 0)
+            logger.info("=" * 60)
+            logger.info(f"[答案对比] 题目ID: {question_id}")
+            logger.info(f"[答案对比] 用户选择: {answer_index} ({chr(65+int(answer_index)) if answer_index and answer_index.isdigit() and 0 <= int(answer_index) < 26 else 'N/A'})")
+            logger.info(f"[答案对比] 正确答案: {correct_answer}")
+            logger.info(f"[答案对比] 相似度: {similarity}")
+            if cache_info.get('answer_index') is not None:
+                logger.info(f"[答案对比] 正确答案索引: {cache_info['answer_index']} ({chr(65+cache_info['answer_index'])})")
+            logger.info("=" * 60)
+        else:
+            logger.info(f"[接收答案] 未找到该题目的缓存答案")
+        
+        # 只返回确认，不发送实际响应（Charles会处理）
+        return jsonify({"status": "received", "message": "答案提交已接收"}), 200
+        
+    except Exception as e:
+        logger.error(f"[接收答案错误] {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 200  # 即使出错也返回200
+
+
+@app.route('/cache', methods=['GET'])
+def get_cache():
+    """查看题目缓存"""
+    return jsonify({
+        "count": len(_question_cache),
+        "cache": _question_cache
+    })
+
+
+@app.route('/cache/clear', methods=['POST'])
+def clear_cache():
+    """清空缓存"""
+    _question_cache.clear()
+    return jsonify({"message": "缓存已清空"})
+
+
+@app.route('/qa/api/quiz/receive', methods=['POST'])
+def receive_quiz_response():
+    """接收题目响应数据（从Charles Rewrite规则调用）"""
+    try:
+        # 接收Charles转发的响应数据
+        data = request.get_json() or {}
+        logger.info(f"[接收响应] 收到题目响应数据")
+        
+        # 提取题目信息
+        if isinstance(data, dict):
+            question_data = data.get("data", data)
+            question_id = question_data.get("questionId") or question_data.get("id")
+            question_text = extract_question_text(question_data)
+            
+            if question_text and question_id:
+                logger.info(f"[接收响应] 题目 ID={question_id}, 文本: {question_text[:50]}...")
+                
+                # 使用线程异步搜题
+                def search_in_background():
+                    try:
+                        answer_info = search_answer(question_text)
+                        if answer_info:
+                            logger.info(f"[搜题结果] 找到答案: {answer_info['answer']}, 相似度: {answer_info['similarity']}")
+                            
+                            # 缓存答案
+                            _question_cache[question_id] = {
+                                "question_text": question_text,
+                                "answer": answer_info["answer"],
+                                "similarity": answer_info["similarity"],
+                                "all_results": answer_info.get("all_results", [])
+                            }
+                            
+                            # 尝试找到选项索引
+                            options = question_data.get("options", [])
+                            answer_index = find_answer_index(answer_info["answer"], options)
+                            
+                            if answer_index is not None:
+                                logger.info(f"[搜题结果] 答案索引: {answer_index} (选项: {chr(65+answer_index)})")
+                                _question_cache[question_id]["answer_index"] = answer_index
+                            
+                            # 在控制台输出答案信息
+                            logger.info("")
+                            logger.info("=" * 80)
+                            logger.info(f"题目ID: {question_id}")
+                            logger.info("-" * 80)
+                            logger.info(f"题目: {question_text}")
+                            logger.info("")
+                            logger.info("【最匹配的3个结果】")
+                            logger.info("-" * 80)
+                            all_results = answer_info.get("all_results", [])
+                            for i, result in enumerate(all_results[:3], 1):
+                                question_text_result = result.get('question', '')
+                                answer_text = result.get('answer', 'N/A')
+                                similarity = result.get('similarity', 0)
+                                number = result.get('number', 'N/A')
+                                options = result.get('options', {})
+                                
+                                logger.info(f"结果 {i}: 题号 {number} | 相似度: {similarity:.4f}")
+                                logger.info(f"  题目: {question_text_result}")
+                                if options:
+                                    logger.info("  选项:")
+                                    for opt_key in sorted(options.keys()):
+                                        logger.info(f"    {opt_key}. {options[opt_key]}")
+                                logger.info(f"  答案: {answer_text}")
+                                if i < len(all_results[:3]):
+                                    logger.info("-" * 80)
+                            
+                            logger.info("")
+                            logger.info("【推荐答案】")
+                            logger.info(f"  答案: {answer_info['answer']}")
+                            logger.info(f"  相似度: {answer_info['similarity']:.4f}")
+                            if answer_index is not None:
+                                logger.info(f"  选项索引: {answer_index} ({chr(65+answer_index)})")
+                            logger.info("=" * 80)
+                            logger.info("")
+                        else:
+                            logger.warning(f"[搜题结果] 未找到答案: {question_id}")
+                    except Exception as e:
+                        logger.error(f"[搜题错误] {e}", exc_info=True)
+                
+                # 启动后台线程搜题
+                thread = threading.Thread(target=search_in_background, daemon=True)
+                thread.start()
+        
+        return jsonify({"status": "received"}), 200
+        
+    except Exception as e:
+        logger.error(f"[接收响应错误] {e}", exc_info=True)
+        return jsonify({"status": "error"}), 200
+
+
+@app.route('/proxy_info', methods=['GET'])
+def proxy_info():
+    """服务信息"""
+    return jsonify({
+        "name": "东方财富答题镜像服务",
+        "version": "2.0.0",
+        "mode": "mirror",
+        "status": "ready" if _model else "not_ready",
+        "description": "只接收数据包，不发送响应（镜像模式）",
+        "endpoints": {
+            "GET /qa/api/quiz/<id>": "接收题目请求（镜像）",
+            "POST /qa/api/quiz/receive": "接收题目响应数据（从Charles Rewrite调用）",
+            "POST /qa/api/quiz/answer": "接收答案提交（镜像）",
+            "GET /cache": "查看题目缓存",
+            "POST /cache/clear": "清空缓存",
+            "GET /health": "健康检查",
+            "GET /proxy_info": "服务信息"
+        },
+        "note": "此服务只接收数据，不参与实际的请求-响应流程。Charles会正常转发所有请求。"
+    })
+
+
+if __name__ == '__main__':
+    # 初始化搜题引擎
+    if not init_search_engine():
+        logger.error("搜题引擎初始化失败，程序退出")
+        exit(1)
+    
+    # 启动服务器
+    host = os.getenv('PROXY_HOST', '0.0.0.0')
+    port = int(os.getenv('PROXY_PORT', '8889'))  # 默认8889，避免与Charles冲突
+    
+    logger.info("=" * 60)
+    logger.info("东方财富答题镜像服务启动")
+    logger.info(f"监听地址: http://{host}:{port}")
+    logger.info("=" * 60)
+    logger.info("📋 镜像模式 - 只接收数据，不发送响应")
+    logger.info("=" * 60)
+    logger.info("")
+    logger.info("⚠️  重要：不要配置Charles Map Remote！")
+    logger.info("   让Charles正常转发所有请求到真实服务器")
+    logger.info("")
+    logger.info("配置方法（推荐手动方式）:")
+    logger.info("")
+    logger.info("1. 在Charles中查看题目响应")
+    logger.info("   - 找到 quiz-activity.eastmoney.com/qa/api/quiz/* 的响应")
+    logger.info("   - 复制响应JSON数据")
+    logger.info("")
+    logger.info("2. 发送到Flask服务:")
+    logger.info("   curl -X POST http://localhost:8889/qa/api/quiz/receive \\")
+    logger.info("     -H 'Content-Type: application/json' \\")
+    logger.info("     -d '{\"data\": {粘贴响应数据}}'")
+    logger.info("")
+    logger.info("3. 或者使用Python脚本自动发送（见文档）")
+    logger.info("")
+    logger.info("服务接口:")
+    logger.info("   POST /qa/api/quiz/receive - 接收题目响应（搜题）")
+    logger.info("   POST /qa/api/quiz/answer - 接收答案提交（对比）")
+    logger.info("   GET /cache - 查看缓存")
+    logger.info("")
+    logger.info("详细配置请查看: Charles镜像配置步骤.md")
+    logger.info("=" * 60)
+    
+    app.run(host=host, port=port, debug=False, threaded=True)
+
