@@ -10,9 +10,13 @@ import logging
 import re
 import threading
 from typing import Dict, Any, Optional
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
 import requests
 from flask_cors import CORS
+from capture_pipeline import CapturePipeline
+from capture_store import QuizCaptureStore
+from markdown_export import default_markdown_path, export_markdown
+from progress_tracker import get_progress_tracker
 
 # 修复Windows控制台编码问题
 if sys.platform == 'win32':
@@ -38,18 +42,40 @@ if sys.platform == 'win32':
     # 设置环境变量
     os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-# 导入搜题模块
-from semantic_search import (
-    load_database,
-    build_or_load_embeddings,
-    search_questions,
-    prepare_model_precision,
-    SentenceTransformer,
-    DATABASE_PATH,
-    MODEL_DIR,
-    DEVICE,
-    TOP_K_DEFAULT,
-)
+# 导入搜题模块；抓包归档模式不应被模型依赖阻塞。
+try:
+    from semantic_search import (
+        load_database,
+        build_or_load_embeddings,
+        search_questions,
+        prepare_model_precision,
+        SentenceTransformer,
+        DATABASE_PATH,
+        MODEL_DIR,
+        DEVICE,
+        TOP_K_DEFAULT,
+    )
+    _SEARCH_IMPORT_ERROR = None
+except ModuleNotFoundError as exc:
+    # 允许只启动 Charles MCP 接收端，安装模型依赖后再启用语义搜题。
+    _SEARCH_IMPORT_ERROR = str(exc)
+    SentenceTransformer = Any
+    DATABASE_PATH = os.path.join(os.path.dirname(__file__), "database.json")
+    MODEL_DIR = ""
+    DEVICE = "cpu"
+    TOP_K_DEFAULT = 5
+
+    def load_database(*args, **kwargs):
+        raise RuntimeError(f"搜题依赖未安装: {_SEARCH_IMPORT_ERROR}")
+
+    def build_or_load_embeddings(*args, **kwargs):
+        raise RuntimeError(f"搜题依赖未安装: {_SEARCH_IMPORT_ERROR}")
+
+    def search_questions(*args, **kwargs):
+        return []
+
+    def prepare_model_precision(*args, **kwargs):
+        return None
 
 # 配置日志
 logging.basicConfig(
@@ -91,6 +117,10 @@ _meta: Optional[list] = None
 
 # 题目缓存（questionId -> 答案）
 _question_cache: Dict[int, Dict[str, Any]] = {}
+_capture_store = QuizCaptureStore()
+_capture_pipeline: Optional[CapturePipeline] = None
+_automation_runner = None
+_progress = get_progress_tracker()
 
 
 def init_search_engine():
@@ -227,6 +257,55 @@ def find_answer_index(answer_text: str, options: list) -> Optional[int]:
     return None
 
 
+def get_capture_pipeline() -> CapturePipeline:
+    """懒加载抓包管线，避免模块导入阶段触发模型初始化。"""
+    global _capture_pipeline
+    if _capture_pipeline is None:
+        _capture_pipeline = CapturePipeline(
+            store=_capture_store,
+            answer_resolver=search_answer,
+        )
+    return _capture_pipeline
+
+
+def get_automation_runner():
+    """懒加载完整自动答题编排器。"""
+    global _automation_runner
+    if _automation_runner is None:
+        from automation_runner import QuizAutomation
+        from charles_mcp_adapter import CharlesMcpClient
+
+        mcp = CharlesMcpClient() if os.getenv("CHARLES_MCP_URL") else None
+        _automation_runner = QuizAutomation(
+            store=_capture_store,
+            local_resolver=search_answer,
+            mcp=mcp,
+            progress=_progress,
+        )
+    return _automation_runner
+
+
+def ingest_capture(payload: Dict[str, Any], source: str) -> Dict[str, Any]:
+    """统一保存抓包，并把结果同步到旧版内存缓存。"""
+    result = get_capture_pipeline().ingest(payload, source=source)
+    question = result.get("question") or {}
+    question_id = question.get("question_id")
+    if question_id:
+        _question_cache[int(question_id) if str(question_id).isdigit() else question_id] = {
+            "question_text": question.get("question_text", ""),
+            "question_title": question.get("question_title", ""),
+            "options": question.get("options", []),
+            "answer": question.get("inferred_answer"),
+            "answer_index": question.get("inferred_answer_index"),
+            "similarity": question.get("similarity"),
+            "analysis": question.get("server_analysis"),
+            "answer_source": question.get("answer_source"),
+            "capture_id": result.get("capture_id"),
+            "raw": question.get("raw", {}),
+        }
+    return result
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """健康检查"""
@@ -234,7 +313,9 @@ def health_check():
         return jsonify({"status": "not_ready"}), 503
     return jsonify({
         "status": "ready",
-        "cache_size": len(_question_cache)
+        "cache_size": len(_question_cache),
+        "capture_store": _capture_store.stats(),
+        "progress": _progress.snapshot()["state"],
     })
 
 
@@ -271,6 +352,22 @@ def receive_quiz_only(quiz_id: str):
             data = question_data.get("data", question_data)
             question_id = data.get("questionId") or data.get("id")
             question_text = extract_question_text(data)
+            # 保留原始题目响应，后续可在 SQLite 中查看完整选项和服务器字段。
+            try:
+                ingest_capture(
+                    {
+                        "request": {
+                            "method": request.method,
+                            "path": request.path,
+                            "query": query_params,
+                            "headers": dict(request.headers),
+                        },
+                        "response": {"status_code": 200, "body": question_data},
+                    },
+                    source="legacy_receive_question",
+                )
+            except Exception:
+                logger.exception("[抓包持久化] 题目保存失败")
             
             if question_text and question_id:
                 logger.info(f"[接收题目] 检测到题目 ID={question_id}, 文本: {question_text[:50]}...")
@@ -482,6 +579,22 @@ def receive_answer_only():
         
         logger.info(f"[接收答案] questionId={question_id}, answerIndex={answer_index}, quizId={quiz_id}")
         logger.info(f"[接收答案] 请求来源: {request.remote_addr}")
+        try:
+            # 镜像模式只能看到请求，先记录提交；服务器响应由 Charles MCP 事件补齐。
+            ingest_capture(
+                {
+                    "request": {
+                        "method": request.method,
+                        "path": request.path,
+                        "headers": dict(request.headers),
+                        "body": request_data,
+                    },
+                    "response": {"status_code": 200, "body": {}},
+                },
+                source="legacy_answer_request",
+            )
+        except Exception:
+            logger.exception("[抓包持久化] 答案提交保存失败")
         
         # 检查缓存中是否有答案（仅用于日志显示）
         if question_id and question_id in _question_cache:
@@ -516,6 +629,148 @@ def get_cache():
     })
 
 
+@app.route('/mcp/charles/capture', methods=['POST'])
+def receive_charles_mcp_capture():
+    """接收 Charles MCP bridge 推送的标准抓包信封。"""
+    try:
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "error": "请求体必须是 JSON 对象"}), 400
+        # 默认开启完整编排；提交通道由 automation_runner 按 MCP 配置决定。
+        if os.getenv("AUTO_SUBMIT", "1") == "1":
+            result = get_automation_runner().handle_capture(payload)
+        else:
+            result = ingest_capture(payload, source="charles_mcp")
+        return jsonify({"success": True, **result})
+    except Exception as exc:
+        logger.error("[Charles MCP] 抓包处理失败: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route('/captures', methods=['GET'])
+def list_captures():
+    """读取最近抓包元数据。"""
+    limit = request.args.get("limit", default=100, type=int)
+    return jsonify({"success": True, "items": _capture_store.list_captures(limit)})
+
+
+@app.route('/progress', methods=['GET'])
+def progress_status():
+    """返回自动化当前状态和最近事件。"""
+    return jsonify({"success": True, **_progress.snapshot()})
+
+
+@app.route('/progress/stream', methods=['GET'])
+def progress_stream():
+    """通过 SSE 推送自动化进度。"""
+    subscriber = _progress.subscribe()
+
+    def event_stream():
+        """把进度事件编码为 SSE 数据帧。"""
+        for event in _progress.stream(subscriber):
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return Response(
+        event_stream(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.route('/dashboard', methods=['GET'])
+def progress_dashboard():
+    """提供浏览器进度仪表盘。"""
+    path = os.path.join(os.path.dirname(__file__), "progress_dashboard.html")
+    return send_file(path, mimetype="text/html")
+
+
+@app.route('/questions', methods=['GET'])
+def list_questions():
+    """分页读取题目、答案、相似度和服务器解析。"""
+    limit = request.args.get("limit", default=100, type=int)
+    offset = request.args.get("offset", default=0, type=int)
+    return jsonify({
+        "success": True,
+        "items": _capture_store.list_questions(limit=limit, offset=offset),
+        "stats": _capture_store.stats(),
+    })
+
+
+@app.route('/questions/<question_id>', methods=['GET'])
+def get_question(question_id: str):
+    """读取单道题的完整归档。"""
+    item = _capture_store.get_question(question_id)
+    if item is None:
+        return jsonify({"success": False, "error": "题目不存在"}), 404
+    return jsonify({"success": True, "item": item})
+
+
+@app.route('/answers.md', methods=['GET'])
+def answers_markdown():
+    """重新导出并返回答题记录 Markdown。"""
+    try:
+        result = export_markdown(_capture_store)
+    except OSError as exc:
+        logger.error("[答题记录] 导出失败: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+    return send_file(result["path"], mimetype="text/markdown")
+
+
+@app.route('/answers.md/export', methods=['POST'])
+def trigger_answers_export():
+    """手动触发答题记录导出。"""
+    try:
+        return jsonify({"success": True, **export_markdown(_capture_store)})
+    except OSError as exc:
+        logger.error("[答题记录] 导出失败: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route('/automation/next', methods=['GET'])
+def automation_next():
+    """返回最近一道已解析题目，供答题端按需消费。"""
+    items = _capture_store.list_questions(limit=1)
+    if not items:
+        return jsonify({"success": False, "error": "尚未捕获题目"}), 404
+    item = items[0]
+    return jsonify({
+        "success": True,
+        "question": item,
+        "ready": bool(item.get("answer")),
+    })
+
+
+@app.route('/automation/submission', methods=['POST'])
+def automation_submission():
+    """记录答题端提交结果，便于离线回放和准确率统计。"""
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "error": "请求体必须是 JSON 对象"}), 400
+    try:
+        result = ingest_capture(
+            {
+                "request": {
+                    "method": "POST",
+                    "path": "/qa/api/quiz/answer",
+                    "body": payload,
+                },
+                "response": {
+                    "status_code": payload.get("status_code", 200),
+                    "body": payload.get("server_response", {}),
+                },
+            },
+            source="automation_client",
+        )
+        return jsonify({"success": True, **result})
+    except Exception as exc:
+        logger.error("[自动化记录] 失败: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
 @app.route('/cache/clear', methods=['POST'])
 def clear_cache():
     """清空缓存"""
@@ -530,6 +785,20 @@ def receive_quiz_response():
         # 接收Charles转发的响应数据
         data = request.get_json() or {}
         logger.info(f"[接收响应] 收到题目响应数据")
+        try:
+            ingest_capture(
+                {
+                    "request": {
+                        "method": request.method,
+                        "path": request.path,
+                        "headers": dict(request.headers),
+                    },
+                    "response": {"status_code": 200, "body": data},
+                },
+                source="legacy_charles_rewrite",
+            )
+        except Exception:
+            logger.exception("[抓包持久化] Charles 响应保存失败")
         
         # 提取题目信息
         if isinstance(data, dict):
@@ -630,7 +899,17 @@ def proxy_info():
             "GET /cache": "查看题目缓存",
             "POST /cache/clear": "清空缓存",
             "GET /health": "健康检查",
-            "GET /proxy_info": "服务信息"
+            "GET /proxy_info": "服务信息",
+            "POST /mcp/charles/capture": "接收 Charles MCP 抓包",
+            "GET /captures": "查看抓包索引",
+            "GET /progress": "查看当前自动化进度",
+            "GET /progress/stream": "订阅实时进度 SSE",
+            "GET /dashboard": "打开浏览器进度仪表盘",
+            "GET /questions": "查看题目、答案、解析归档",
+            "GET /answers.md": "下载答题记录 Markdown",
+            "POST /answers.md/export": "手动刷新答题记录 Markdown",
+            "GET /automation/next": "读取下一道已解析题目",
+            "POST /automation/submission": "记录答题端提交结果",
         },
         "note": "此服务只接收数据，不参与实际的请求-响应流程。Charles会正常转发所有请求。"
     })
