@@ -215,14 +215,17 @@
     pill($("capture-pill"), cap.state);
     const ch = cap.channel || {};
     const CHANNEL_TEXT = {
-      http_mcp: "HTTP MCP",
+      http_mcp: "HTTP MCP 已连通",
+      http_mcp_down: "HTTP MCP 连不上",
       mirror: "Mirror 监听",
       mirror_idle: "Mirror 未监听",
       none: "无可用通道",
     };
     $("capture-msg").textContent = cap.message;
+    const mcp = ch.http_mcp || {};
     meta($("capture-meta"), [
       ["通道", CHANNEL_TEXT[ch.channel] || ch.channel || "-"],
+      ["MCP 工具", mcp.reachable ? mcp.tool_count : "未连通"],
       ["Charles", cap.charles_running ? "在运行" : "未运行"],
       ["最近抓包", fmtIdle(cap.idle_seconds)],
     ]);

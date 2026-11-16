@@ -98,11 +98,15 @@ def main():
     assert never["state"] in ("unknown", "offline"), never
     print(f"   state={never['state']} | {never['message']}")
 
-    print("=== 9b. 通道判定：无 HTTP MCP 且无监听时应为 none 或 mirror_idle ===")
+    print("=== 9b. 通道判定：必须是已知通道之一，并说明 stdio 限制 ===")
     channel = ss.check_capture_channel()
-    assert channel["channel"] in ("none", "mirror", "mirror_idle", "http_mcp"), channel
-    assert "stdio" in channel["stdio_mcp_note"].lower() or "stdio" in channel["stdio_mcp_note"]
-    print(f"   channel={channel['channel']} | {channel['message']}")
+    known = ("none", "mirror", "mirror_idle", "http_mcp", "http_mcp_down")
+    assert channel["channel"] in known, channel
+    assert "stdio" in channel["stdio_mcp_note"]
+    # 配置了 URL 就必须给出真实探测结果，而不是仅凭配置断定可用
+    assert "http_mcp" in channel and "reachable" in channel["http_mcp"]
+    print(f"   channel={channel['channel']} | reachable={channel['http_mcp']['reachable']}")
+    print(f"   message={channel['message']}")
 
     def capture_with(channel_kind, state="idle"):
         """构造指定通道的抓包状态，避免测试依赖真实目录。"""
@@ -139,6 +143,32 @@ def main():
     assert readiness["ready"] is False
     assert any("watch_charles_mirror" in item for item in readiness["blockers"])
     print("   blockers:", readiness["blockers"])
+
+    print("=== 14. 就绪判定：HTTP MCP 配了但连不上必须阻塞 ===")
+    readiness = ss.check_readiness(
+        online, {"state": "online", "message": "齐备"}, capture_with("http_mcp_down")
+    )
+    assert readiness["ready"] is False
+    assert any("charles_mcp_http" in item for item in readiness["blockers"])
+    print("   blockers:", readiness["blockers"])
+
+    print("=== 15. 就绪判定：HTTP MCP 连通时不阻塞 ===")
+    readiness = ss.check_readiness(
+        online, {"state": "online", "message": "齐备"}, capture_with("http_mcp")
+    )
+    assert readiness["ready"] is True
+    print("   warnings:", readiness["warnings"])
+
+    print("=== 16. MCP 客户端对不可用端点必须抛 CharlesMcpError ===")
+    from charles_mcp_adapter import CharlesMcpClient, CharlesMcpError
+
+    bad = CharlesMcpClient(endpoint="http://127.0.0.1:9/mcp", timeout=2)
+    try:
+        bad.list_tools()
+        raise AssertionError("不可用端点不应成功")
+    except CharlesMcpError as exc:
+        assert "不可用" in str(exc) or "无法连接" in str(exc)
+        print("   ok:", str(exc)[:80])
 
     print("status check test passed")
 

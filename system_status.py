@@ -244,13 +244,41 @@ def check_capture_channel() -> Dict[str, Any]:
 
     stdio MCP 必须由 Agent 拉起子进程，独立工作流无法使用，
     因此只把 HTTP MCP 与 Mirror 文件监听视为可用通道。
+
+    配置了 CHARLES_MCP_URL 不代表能用，必须真实握手成功才算在线。
     """
     mcp_url = config.get("CHARLES_MCP_URL")
-    http_mcp = bool(mcp_url)
+    http_mcp_configured = bool(mcp_url)
+    mcp_probe: Dict[str, Any] = {
+        "configured": http_mcp_configured,
+        "url": mcp_url,
+        "reachable": False,
+        "tool_count": 0,
+        "error": None,
+    }
+
+    if http_mcp_configured:
+        try:
+            from charles_mcp_adapter import CharlesMcpClient
+
+            client = CharlesMcpClient(endpoint=mcp_url, timeout=8.0)
+            tools = client.list_tools()
+            mcp_probe["reachable"] = True
+            mcp_probe["tool_count"] = len(tools)
+        except Exception as exc:
+            mcp_probe["error"] = str(exc)[:200]
+
     mirror = _check_mirror_channel()
 
-    if http_mcp:
-        channel, message = "http_mcp", f"已配置 HTTP MCP 端点：{mcp_url}"
+    if mcp_probe["reachable"]:
+        channel = "http_mcp"
+        message = f"HTTP MCP 已连通（{mcp_probe['tool_count']} 个工具）：{mcp_url}"
+    elif http_mcp_configured:
+        channel = "http_mcp_down"
+        message = (
+            f"已配置 HTTP MCP 端点但连不上：{mcp_probe['error']}；"
+            "请先运行 charles_mcp_http.py"
+        )
     elif mirror["watcher_running"]:
         channel, message = "mirror", mirror["message"]
     elif mirror["exists"] and mirror["file_count"] > 0:
@@ -263,8 +291,9 @@ def check_capture_channel() -> Dict[str, Any]:
     return {
         "channel": channel,
         "message": message,
-        "http_mcp_configured": http_mcp,
+        "http_mcp_configured": http_mcp_configured,
         "http_mcp_url": mcp_url,
+        "http_mcp": mcp_probe,
         "mirror": mirror,
         "stdio_mcp_note": "Cursor 里的 charles MCP 是 stdio 形态，必须由 Agent 拉起，独立服务无法调用",
     }
@@ -365,6 +394,8 @@ def check_readiness(bank: Dict[str, Any], files: Dict[str, Any], capture: Dict[s
     channel_kind = channel.get("channel")
     if channel_kind == "none":
         blockers.append("没有可用的抓包通道：题目无法进入，自动答题不会启动")
+    elif channel_kind == "http_mcp_down":
+        blockers.append("HTTP MCP 端点连不上：先运行 charles_mcp_http.py，否则收不到题目")
     elif channel_kind == "mirror_idle":
         blockers.append("Mirror 目录有历史抓包但监听未运行：启动 watch_charles_mirror.py 才能自动收题")
     elif capture["state"] in ("offline", "unknown"):
