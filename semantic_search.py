@@ -3,9 +3,12 @@ import os
 from typing import List, Dict, Any
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
-DEFAULT_PROXY = "http://127.0.0.1:8888"
-os.environ.setdefault("HTTP_PROXY", DEFAULT_PROXY)
-os.environ.setdefault("HTTPS_PROXY", DEFAULT_PROXY)
+# 代理只在显式设置 PROXY_URL 时启用。默认不挂代理，否则进程内所有 requests
+# 调用（含答案提交）都会绕到该地址，代理没开时全部失败。
+DEFAULT_PROXY = os.environ.get("PROXY_URL")
+if DEFAULT_PROXY:
+    os.environ.setdefault("HTTP_PROXY", DEFAULT_PROXY)
+    os.environ.setdefault("HTTPS_PROXY", DEFAULT_PROXY)
 os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1")
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HOME", os.path.join(os.getcwd(), "hf_cache"))
