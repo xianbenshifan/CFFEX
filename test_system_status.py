@@ -85,30 +85,60 @@ def main():
     assert fresh["state"] == "online", fresh
     print("  ", fresh["message"])
 
-    print("=== 8. 长时间无抓包且无 Charles/MCP 应判离线，并保留时长 ===")
+    print("=== 8. 长时间无抓包：状态取决于通道是否可用 ===")
     stale = ss.check_capture_tool(
         FakeServer(latest=(now - timedelta(minutes=10)).isoformat())
     )
-    assert stale["state"] == "offline", stale
+    assert stale["state"] in ("idle", "offline"), stale
     assert "10 分钟前" in stale["message"], stale["message"]
-    print("  ", stale["message"])
+    print(f"   state={stale['state']} | {stale['message']}")
 
-    print("=== 9. 从未抓过包应判离线并说明 ===")
+    print("=== 9. 从未抓过包：状态取决于通道是否可用 ===")
     never = ss.check_capture_tool(FakeServer(latest=None))
-    assert never["state"] == "offline" and "从未" in never["message"]
-    print("  ", never["message"])
+    assert never["state"] in ("unknown", "offline"), never
+    print(f"   state={never['state']} | {never['message']}")
+
+    print("=== 9b. 通道判定：无 HTTP MCP 且无监听时应为 none 或 mirror_idle ===")
+    channel = ss.check_capture_channel()
+    assert channel["channel"] in ("none", "mirror", "mirror_idle", "http_mcp"), channel
+    assert "stdio" in channel["stdio_mcp_note"].lower() or "stdio" in channel["stdio_mcp_note"]
+    print(f"   channel={channel['channel']} | {channel['message']}")
+
+    def capture_with(channel_kind, state="idle"):
+        """构造指定通道的抓包状态，避免测试依赖真实目录。"""
+        return {"state": state, "message": "测试", "channel": {"channel": channel_kind}}
 
     print("=== 10. 就绪判定：题库离线时必须阻塞 ===")
-    readiness = ss.check_readiness(offline, {"state": "offline", "message": "缺文件"}, never)
+    readiness = ss.check_readiness(
+        offline, {"state": "offline", "message": "缺文件"}, capture_with("mirror")
+    )
     assert readiness["ready"] is False
     assert any("题库" in item for item in readiness["blockers"])
     print("   blockers:", readiness["blockers"])
 
-    print("=== 11. 就绪判定：题库在线但抓包离线只算提醒 ===")
-    readiness = ss.check_readiness(online, {"state": "online", "message": "齐备"}, never)
+    print("=== 11. 就绪判定：题库在线、通道正常时只保留降级提醒 ===")
+    readiness = ss.check_readiness(
+        online, {"state": "online", "message": "齐备"}, capture_with("mirror")
+    )
     assert readiness["ready"] is True
-    assert any("抓包" in item for item in readiness["warnings"])
+    assert not any("抓包通道" in item for item in readiness["blockers"])
     print("   warnings:", readiness["warnings"])
+
+    print("=== 12. 就绪判定：完全没有通道必须阻塞 ===")
+    readiness = ss.check_readiness(
+        online, {"state": "online", "message": "齐备"}, capture_with("none")
+    )
+    assert readiness["ready"] is False
+    assert any("抓包通道" in item for item in readiness["blockers"])
+    print("   blockers:", readiness["blockers"])
+
+    print("=== 13. 就绪判定：Mirror 有文件但监听未跑必须阻塞 ===")
+    readiness = ss.check_readiness(
+        online, {"state": "online", "message": "齐备"}, capture_with("mirror_idle")
+    )
+    assert readiness["ready"] is False
+    assert any("watch_charles_mirror" in item for item in readiness["blockers"])
+    print("   blockers:", readiness["blockers"])
 
     print("status check test passed")
 

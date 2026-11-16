@@ -163,6 +163,113 @@ def check_supporting_files(server: Any) -> Dict[str, Any]:
     return {"state": state, "message": message, "files": files}
 
 
+def _check_mirror_channel() -> Dict[str, Any]:
+    """检测 Mirror 文件通道：目录是否存在、最近写入时间、监听进程是否在跑。"""
+    mirror_dir = Path(os.getcwd()) / "123321"
+    if not mirror_dir.exists():
+        # 换过工作目录时回落到脚本所在目录
+        mirror_dir = ROOT / "123321"
+
+    result: Dict[str, Any] = {
+        "available": False,
+        "directory": str(mirror_dir),
+        "exists": mirror_dir.exists(),
+        "file_count": 0,
+        "latest_write_at": None,
+        "idle_seconds": None,
+        "watcher_running": False,
+        "message": "",
+    }
+    if not mirror_dir.exists():
+        result["message"] = f"Mirror 目录不存在：{mirror_dir}"
+        return result
+
+    newest_mtime: Optional[float] = None
+    count = 0
+    try:
+        for path in mirror_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            count += 1
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if newest_mtime is None or mtime > newest_mtime:
+                newest_mtime = mtime
+    except OSError as exc:
+        result["message"] = f"无法读取 Mirror 目录: {exc}"
+        return result
+
+    result["file_count"] = count
+    if newest_mtime is not None:
+        result["latest_write_at"] = (
+            datetime.fromtimestamp(newest_mtime, tz=timezone.utc)
+            .astimezone()
+            .isoformat(timespec="seconds")
+        )
+        result["idle_seconds"] = int(max(0.0, time.time() - newest_mtime))
+
+    # 监听进程：watch_charles_mirror.py 常驻，按命令行特征识别
+    result["watcher_running"] = _process_running("watch_charles_mirror")
+    result["available"] = count > 0
+    if not result["watcher_running"]:
+        result["message"] = "Mirror 目录有文件，但文件监听未运行"
+    elif count == 0:
+        result["message"] = "文件监听在运行，Mirror 目录暂无文件"
+    else:
+        result["message"] = f"文件监听运行中，目录内 {count} 个文件"
+    return result
+
+
+def _process_running(keyword: str) -> bool:
+    """按进程命令行关键字判断某脚本是否在运行。"""
+    try:
+        import psutil
+
+        for proc in psutil.process_iter(["name", "cmdline"]):
+            cmdline = proc.info.get("cmdline") or []
+            joined = " ".join(cmdline).lower()
+            if keyword.lower() in joined:
+                return True
+    except ImportError:
+        return False
+    except Exception:
+        return False
+    return False
+
+
+def check_capture_channel() -> Dict[str, Any]:
+    """判定当前实际生效的抓包通道。
+
+    stdio MCP 必须由 Agent 拉起子进程，独立工作流无法使用，
+    因此只把 HTTP MCP 与 Mirror 文件监听视为可用通道。
+    """
+    mcp_url = config.get("CHARLES_MCP_URL")
+    http_mcp = bool(mcp_url)
+    mirror = _check_mirror_channel()
+
+    if http_mcp:
+        channel, message = "http_mcp", f"已配置 HTTP MCP 端点：{mcp_url}"
+    elif mirror["watcher_running"]:
+        channel, message = "mirror", mirror["message"]
+    elif mirror["exists"] and mirror["file_count"] > 0:
+        channel = "mirror_idle"
+        message = "Mirror 目录有历史抓包，但文件监听未运行；启动 watch_charles_mirror.py 才会自动收题"
+    else:
+        channel = "none"
+        message = "没有任何抓包通道在生效：未配置 HTTP MCP，Mirror 监听也未运行"
+
+    return {
+        "channel": channel,
+        "message": message,
+        "http_mcp_configured": http_mcp,
+        "http_mcp_url": mcp_url,
+        "mirror": mirror,
+        "stdio_mcp_note": "Cursor 里的 charles MCP 是 stdio 形态，必须由 Agent 拉起，独立服务无法调用",
+    }
+
+
 def _human_seconds(seconds: float) -> str:
     """把秒数写成便于阅读的时长。"""
     seconds = int(seconds)
@@ -204,6 +311,7 @@ def check_capture_tool(server: Any) -> Dict[str, Any]:
 
     mcp_url = config.get("CHARLES_MCP_URL")
     mcp_configured = bool(mcp_url)
+    channel = check_capture_channel()
 
     if idle_seconds is None:
         state = "unknown"
@@ -215,13 +323,13 @@ def check_capture_tool(server: Any) -> Dict[str, Any]:
         state = "idle"
         message = f"最近一次抓包在 {_human_seconds(idle_seconds)}"
 
-    # 长时间没有抓包，同时既无 Charles 进程也无 MCP 端点，才判定为离线。
-    if state != "online" and not charles_running and not mcp_configured:
+    # 长时间没有抓包，同时既无 Charles 进程也无可用通道，才判定为离线。
+    if state != "online" and not charles_running and channel["channel"] == "none":
         state = "offline"
         if idle_seconds is not None:
-            message = f"未检测到 Charles 进程，也未配置 MCP 端点；最近一次抓包在 {_human_seconds(idle_seconds)}"
+            message = f"未检测到 Charles 进程，也没有可用抓包通道；最近一次抓包在 {_human_seconds(idle_seconds)}"
         else:
-            message = "未检测到 Charles 进程，也未配置 MCP 端点，且从未收到过抓包"
+            message = "未检测到 Charles 进程，也没有可用抓包通道，且从未收到过抓包"
 
     return {
         "state": state,
@@ -233,6 +341,7 @@ def check_capture_tool(server: Any) -> Dict[str, Any]:
         "charles_detail": charles_detail,
         "mcp_configured": mcp_configured,
         "mcp_url": mcp_url,
+        "channel": channel,
     }
 
 
@@ -250,8 +359,17 @@ def check_readiness(bank: Dict[str, Any], files: Dict[str, Any], capture: Dict[s
 
     if not config.api_key("DEEPSEEK_API_KEY"):
         warnings.append("未配置 DEEPSEEK_API_KEY，大模型兜底被跳过")
-    if capture["state"] in ("offline", "unknown"):
+
+    # 没有任何可用通道时，题目根本进不来，属于硬阻塞。
+    channel = capture.get("channel") or {}
+    channel_kind = channel.get("channel")
+    if channel_kind == "none":
+        blockers.append("没有可用的抓包通道：题目无法进入，自动答题不会启动")
+    elif channel_kind == "mirror_idle":
+        blockers.append("Mirror 目录有历史抓包但监听未运行：启动 watch_charles_mirror.py 才能自动收题")
+    elif capture["state"] in ("offline", "unknown"):
         warnings.append("抓包链路尚未确认在线，收不到新题就无法自动答题")
+
     if int(config.get_int("SUBMIT_INDEX_BASE", 1)) not in (0, 1):
         warnings.append("SUBMIT_INDEX_BASE 配置非法，提交序号可能错位")
 
