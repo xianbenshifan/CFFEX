@@ -18,6 +18,7 @@ from capture_pipeline import CapturePipeline
 from capture_store import QuizCaptureStore
 from markdown_export import default_markdown_path, export_markdown
 from progress_tracker import get_progress_tracker
+from system_status import collect as collect_status
 
 # 修复Windows控制台编码问题
 if sys.platform == 'win32':
@@ -257,6 +258,22 @@ def find_answer_index(answer_text: str, options: list) -> Optional[int]:
                     return idx
     
     return None
+
+
+class _StatusContext:
+    """把状态检测需要的运行时对象打包，避免依赖模块全局名。"""
+
+    def __init__(self) -> None:
+        self._database = _database
+        self._meta = _meta
+        self._model = _model
+        self._capture_store = _capture_store
+        self._SEARCH_IMPORT_ERROR = _SEARCH_IMPORT_ERROR
+
+
+def build_status_context() -> _StatusContext:
+    """构造状态检测上下文，反映当前进程内的真实加载情况。"""
+    return _StatusContext()
 
 
 def get_capture_pipeline() -> CapturePipeline:
@@ -654,6 +671,16 @@ def list_captures():
     """读取最近抓包元数据。"""
     limit = request.args.get("limit", default=100, type=int)
     return jsonify({"success": True, "items": _capture_store.list_captures(limit)})
+
+
+@app.route('/system/status', methods=['GET'])
+def system_status_api():
+    """返回题库、配套文件、抓包工具与可答题状态。"""
+    try:
+        return jsonify({"success": True, **collect_status(build_status_context())})
+    except Exception as exc:
+        logger.error("[状态检测] 失败: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
 
 
 @app.route('/progress', methods=['GET'])

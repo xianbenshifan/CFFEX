@@ -413,6 +413,14 @@ class QuizCaptureStore:
             for row in rows
         ]
 
+    def latest_capture_time(self) -> Optional[str]:
+        """返回最近一条抓包的时间，供在线状态判断使用。"""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT captured_at FROM captures ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return row["captured_at"] if row else None
+
     def stats(self) -> Dict[str, int]:
         """返回存储统计信息。"""
         with closing(self._connect()) as conn:

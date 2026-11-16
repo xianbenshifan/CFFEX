@@ -1,0 +1,117 @@
+"""运行就绪状态检测的回归测试。"""
+# -*- coding: utf-8 -*-
+import os
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import system_status as ss
+
+
+class FakeStore:
+    """用固定时间替代真实抓包库。"""
+
+    def __init__(self, latest):
+        self._latest = latest
+
+    def latest_capture_time(self):
+        return self._latest
+
+
+class FakeServer:
+    """模拟服务进程内的加载状态。"""
+
+    def __init__(self, latest=None, database=None, meta=None, model=None, error=None):
+        self._capture_store = FakeStore(latest)
+        self._database = database
+        self._meta = meta
+        self._model = model
+        self._SEARCH_IMPORT_ERROR = error
+
+
+def main():
+    """覆盖文件判定、降级判定与就绪判定。"""
+    print("=== 1. Git LFS 指针必须判为异常 ===")
+    with tempfile.TemporaryDirectory() as folder:
+        pointer = Path(folder) / "model.safetensors"
+        pointer.write_text(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 470641600\n",
+            encoding="utf-8",
+        )
+        result = ss.inspect_file(pointer, min_bytes=1024 * 1024)
+        assert result["ok"] is False, "134 字节的 LFS 指针不能当成真实权重"
+        assert "LFS" in result["issue"]
+        print("   ok:", result["issue"])
+
+    print("=== 2. 缺失文件必须判为异常 ===")
+    result = ss.inspect_file(Path("__不存在的文件__.json"))
+    assert result["ok"] is False and "不存在" in result["issue"]
+    print("   ok:", result["issue"])
+
+    print("=== 3. 小文件必须给出真实字节数 ===")
+    with tempfile.TemporaryDirectory() as folder:
+        small = Path(folder) / "config.json"
+        small.write_text("{}", encoding="utf-8")
+        result = ss.inspect_file(small)
+        assert result["ok"] is True and result["bytes"] == 2, result
+        print("   bytes:", result["bytes"])
+
+    print("=== 4. 题库降级：有题库无模型 ===")
+    degraded = ss.check_question_bank(
+        FakeServer(database=[1] * 1000, meta=[], model=None, error="模型缺失")
+    )
+    assert degraded["state"] == "degraded"
+    assert degraded["exact_ready"] is True
+    assert degraded["semantic_ready"] is False
+    print("  ", degraded["message"])
+
+    print("=== 5. 题库离线：题库为空 ===")
+    offline = ss.check_question_bank(FakeServer(database=[], meta=[], model=None))
+    assert offline["state"] == "offline" and offline["exact_ready"] is False
+    print("  ", offline["message"])
+
+    print("=== 6. 题库在线：题库、向量、模型齐备 ===")
+    online = ss.check_question_bank(
+        FakeServer(database=[1] * 1000, meta=[1] * 1000, model=object())
+    )
+    assert online["state"] == "online" and online["semantic_ready"] is True
+    print("  ", online["message"])
+
+    print("=== 7. 抓包新鲜度：刚抓到应判在线 ===")
+    now = datetime.now(timezone.utc)
+    fresh = ss.check_capture_tool(
+        FakeServer(latest=(now - timedelta(seconds=20)).isoformat())
+    )
+    assert fresh["state"] == "online", fresh
+    print("  ", fresh["message"])
+
+    print("=== 8. 长时间无抓包且无 Charles/MCP 应判离线，并保留时长 ===")
+    stale = ss.check_capture_tool(
+        FakeServer(latest=(now - timedelta(minutes=10)).isoformat())
+    )
+    assert stale["state"] == "offline", stale
+    assert "10 分钟前" in stale["message"], stale["message"]
+    print("  ", stale["message"])
+
+    print("=== 9. 从未抓过包应判离线并说明 ===")
+    never = ss.check_capture_tool(FakeServer(latest=None))
+    assert never["state"] == "offline" and "从未" in never["message"]
+    print("  ", never["message"])
+
+    print("=== 10. 就绪判定：题库离线时必须阻塞 ===")
+    readiness = ss.check_readiness(offline, {"state": "offline", "message": "缺文件"}, never)
+    assert readiness["ready"] is False
+    assert any("题库" in item for item in readiness["blockers"])
+    print("   blockers:", readiness["blockers"])
+
+    print("=== 11. 就绪判定：题库在线但抓包离线只算提醒 ===")
+    readiness = ss.check_readiness(online, {"state": "online", "message": "齐备"}, never)
+    assert readiness["ready"] is True
+    assert any("抓包" in item for item in readiness["warnings"])
+    print("   warnings:", readiness["warnings"])
+
+    print("status check test passed")
+
+
+if __name__ == "__main__":
+    main()

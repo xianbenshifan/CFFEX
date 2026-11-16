@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>答题自动化控制台</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0b1220; color: #e2e8f0; font: 14px/1.6 system-ui, "Microsoft YaHei", sans-serif; }
+    main { max-width: 1180px; margin: 0 auto; padding: 22px 18px 48px; }
+    h1 { font-size: 21px; margin: 0 0 4px; }
+    h2 { font-size: 15px; margin: 26px 0 10px; color: #cbd5e1; }
+    .sub { color: #64748b; font-size: 12px; margin-bottom: 18px; }
+
+    /* 四个就绪状态卡 */
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+    .status-card { background: #16213a; border: 1px solid #24304d; border-left: 4px solid #475569; border-radius: 10px; padding: 14px 15px; }
+    .status-card.online { border-left-color: #22c55e; }
+    .status-card.degraded { border-left-color: #f59e0b; }
+    .status-card.offline { border-left-color: #ef4444; }
+    .status-card.idle { border-left-color: #64748b; }
+    .status-card.unknown { border-left-color: #8b5cf6; }
+    .status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .status-title { font-size: 13px; color: #94a3b8; }
+    .pill { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+    .pill.online { background: #14532d; color: #86efac; }
+    .pill.degraded { background: #78350f; color: #fde68a; }
+    .pill.offline { background: #7f1d1d; color: #fca5a5; }
+    .pill.idle { background: #334155; color: #cbd5e1; }
+    .pill.unknown { background: #4c1d95; color: #ddd6fe; }
+    .status-msg { margin-top: 8px; font-size: 13px; color: #e2e8f0; }
+    .status-meta { margin-top: 8px; font-size: 11.5px; color: #64748b; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+
+    /* 可答题总状态 */
+    .ready-banner { margin-top: 14px; border-radius: 12px; padding: 16px 18px; border: 1px solid #24304d; background: #16213a; }
+    .ready-banner.ready { border-color: #15803d; background: #0f2a1d; }
+    .ready-banner.blocked { border-color: #b91c1c; background: #2a1414; }
+    .ready-row { display: flex; align-items: center; gap: 12px; }
+    .ready-dot { width: 12px; height: 12px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 4px #22c55e22; }
+    .ready-banner.blocked .ready-dot { background: #ef4444; box-shadow: 0 0 0 4px #ef444422; }
+    .ready-text { font-size: 17px; font-weight: 700; }
+    .issues { margin: 10px 0 0; padding: 0; list-style: none; }
+    .issues li { font-size: 12.5px; padding: 3px 0 3px 18px; position: relative; }
+    .issues li::before { content: "!"; position: absolute; left: 2px; font-weight: 700; }
+    .issues li.block { color: #fca5a5; }
+    .issues li.warn { color: #fde68a; }
+
+    /* 文件清单 */
+    table { width: 100%; border-collapse: collapse; background: #16213a; border-radius: 8px; overflow: hidden; font-size: 12.5px; }
+    th, td { text-align: left; padding: 8px 11px; border-bottom: 1px solid #24304d; }
+    th { background: #1c2942; color: #94a3b8; font-weight: 600; font-size: 12px; }
+    tr:last-child td { border-bottom: none; }
+    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; color: #94a3b8; }
+    .ok-text { color: #86efac; } .bad-text { color: #fca5a5; } .warn-text { color: #fde68a; }
+
+    /* 答题进度 */
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .card { background: #16213a; border: 1px solid #24304d; border-radius: 10px; padding: 13px 14px; }
+    .label { color: #64748b; font-size: 11.5px; }
+    .value { margin-top: 5px; font-size: 18px; font-weight: 700; word-break: break-word; }
+    .bar { height: 8px; margin: 14px 0 6px; overflow: hidden; border-radius: 999px; background: #24304d; }
+    #bar { height: 100%; width: 0%; background: #22c55e; transition: width .25s; }
+    #message { margin-top: 10px; font-size: 13px; color: #cbd5e1; }
+    #events { height: 240px; overflow: auto; background: #060c18; border: 1px solid #1e293b; border-radius: 10px; padding: 11px; white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; color: #94a3b8; }
+    .footer { margin-top: 18px; font-size: 11.5px; color: #475569; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+    .refresh-note { color: #64748b; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>答题自动化控制台</h1>
+  <div class="sub">就绪状态每 5 秒自动刷新；答题进度通过 SSE 实时推送。</div>
+
+  <h2>运行就绪状态</h2>
+  <div class="status-grid">
+    <div class="status-card" id="bank-card">
+      <div class="status-head">
+        <span class="status-title">题库状态</span>
+        <span class="pill" id="bank-pill">检测中</span>
+      </div>
+      <div class="status-msg" id="bank-msg">-</div>
+      <div class="status-meta" id="bank-meta"></div>
+    </div>
+
+    <div class="status-card" id="files-card">
+      <div class="status-head">
+        <span class="status-title">配套文件</span>
+        <span class="pill" id="files-pill">检测中</span>
+      </div>
+      <div class="status-msg" id="files-msg">-</div>
+      <div class="status-meta" id="files-meta"></div>
+    </div>
+
+    <div class="status-card" id="capture-card">
+      <div class="status-head">
+        <span class="status-title">抓包工具</span>
+        <span class="pill" id="capture-pill">检测中</span>
+      </div>
+      <div class="status-msg" id="capture-msg">-</div>
+      <div class="status-meta" id="capture-meta"></div>
+    </div>
+
+    <div class="status-card" id="ready-card">
+      <div class="status-head">
+        <span class="status-title">可答题状态</span>
+        <span class="pill" id="ready-pill">检测中</span>
+      </div>
+      <div class="status-msg" id="ready-msg">-</div>
+      <div class="status-meta" id="ready-meta"></div>
+    </div>
+  </div>
+
+  <div class="ready-banner" id="ready-banner">
+    <div class="ready-row">
+      <span class="ready-dot"></span>
+      <span class="ready-text" id="ready-text">正在检测…</span>
+    </div>
+    <ul class="issues" id="ready-issues"></ul>
+  </div>
+
+  <h2>配套文件明细</h2>
+  <table>
+    <thead>
+      <tr><th>文件</th><th>状态</th><th>大小</th><th>更新时间</th><th>说明</th></tr>
+    </thead>
+    <tbody id="files-body">
+      <tr><td colspan="5" class="mono">加载中…</td></tr>
+    </tbody>
+  </table>
+
+  <h2>答题进度</h2>
+  <div class="grid">
+    <div class="card"><div class="label">状态</div><div id="status" class="value">idle</div></div>
+    <div class="card"><div class="label">当前阶段</div><div id="stage" class="value">idle</div></div>
+    <div class="card"><div class="label">当前题目</div><div id="question" class="value">-</div></div>
+    <div class="card"><div class="label">答案来源</div><div id="source" class="value">-</div></div>
+    <div class="card"><div class="label">提交通道</div><div id="transport" class="value">-</div></div>
+    <div class="card"><div class="label">相似度 / 置信度</div><div id="similarity" class="value">-</div></div>
+  </div>
+  <div class="bar"><div id="bar"></div></div>
+  <div id="message">等待事件…</div>
+
+  <h2>实时事件</h2>
+  <div id="events"></div>
+
+  <div class="footer">
+    <span class="refresh-note" id="checked-at">-</span>
+    <span class="refresh-note">就绪状态 5s 轮询 · 进度 SSE 推送</span>
+  </div>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const STATE_TEXT = { online: "在线", degraded: "降级", offline: "离线", idle: "空闲", unknown: "未确认" };
+  const STATE_TEXT_EN = { online: "OK", degraded: "DEGRADED", offline: "OFFLINE", idle: "IDLE", unknown: "UNKNOWN" };
+
+  function pill(el, state) {
+    el.className = "pill " + state;
+    el.textContent = STATE_TEXT[state] || state;
+  }
+  function card(el, state) {
+    el.className = "status-card " + state;
+  }
+  function meta(el, pairs) {
+    el.innerHTML = "";
+    pairs.filter(p => p[1] !== null && p[1] !== undefined && p[1] !== "")
+      .forEach(([k, v]) => {
+        const s = document.createElement("span");
+        s.textContent = `${k} ${v}`;
+        el.appendChild(s);
+      });
+  }
+  function fmtTime(iso) {
+    if (!iso) return "-";
+    const d = new Date(iso);
+    return isNaN(d) ? iso : d.toLocaleString("zh-CN", { hour12: false });
+  }
+  function fmtIdle(sec) {
+    if (sec === null || sec === undefined) return "-";
+    if (sec < 60) return sec + " 秒前";
+    if (sec < 3600) return Math.floor(sec / 60) + " 分钟前";
+    if (sec < 86400) return Math.floor(sec / 3600) + " 小时前";
+    return Math.floor(sec / 86400) + " 天前";
+  }
+  function fmtSize(f) {
+    const bytes = Number(f.bytes || 0);
+    if (!bytes) return "0";
+    if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(2) + " MB";
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return bytes + " B";
+  }
+
+  function renderStatus(d) {
+    // 1. 题库
+    const bank = d.question_bank;
+    card($("bank-card"), bank.state);
+    pill($("bank-pill"), bank.state);
+    $("bank-msg").textContent = bank.message;
+    meta($("bank-meta"), [
+      ["题数", bank.question_count],
+      ["向量", bank.vector_count],
+      ["语义模型", bank.model_loaded ? "已加载" : "未加载"],
+    ]);
+
+    // 2. 配套文件
+    const files = d.files;
+    card($("files-card"), files.state);
+    pill($("files-pill"), files.state);
+    $("files-msg").textContent = files.message;
+    const okCount = files.files.filter(f => f.ok).length;
+    meta($("files-meta"), [["可用", `${okCount}/${files.files.length}`]]);
+
+    // 3. 抓包工具
+    const cap = d.capture_tool;
+    card($("capture-card"), cap.state);
+    pill($("capture-pill"), cap.state);
+    $("capture-msg").textContent = cap.message;
+    meta($("capture-meta"), [
+      ["Charles", cap.charles_running ? "在运行" : "未运行"],
+      ["最近抓包", fmtIdle(cap.idle_seconds)],
+      ["MCP", cap.mcp_configured ? "已配置" : "未配置"],
+    ]);
+
+    // 4. 可答题总状态
+    const rd = d.readiness;
+    const readyState = rd.ready ? (rd.warnings.length ? "degraded" : "online") : "offline";
+    card($("ready-card"), readyState);
+    pill($("ready-pill"), readyState);
+    $("ready-msg").textContent = rd.ready
+      ? (rd.warnings.length ? "可以答题，但有降级项" : "一切就绪，可以答题")
+      : "不能答题，存在阻塞项";
+    meta($("ready-meta"), [
+      ["提交序号", rd.submit_index_hint],
+      ["自动提交", rd.auto_submit ? "开" : "关"],
+    ]);
+
+    const banner = $("ready-banner");
+    banner.className = "ready-banner " + (rd.ready ? "ready" : "blocked");
+    $("ready-text").textContent = rd.ready ? "当前可以开始答题" : "当前无法答题";
+    const list = $("ready-issues");
+    list.innerHTML = "";
+    rd.blockers.forEach(t => {
+      const li = document.createElement("li");
+      li.className = "block";
+      li.textContent = "阻塞：" + t;
+      list.appendChild(li);
+    });
+    rd.warnings.forEach(t => {
+      const li = document.createElement("li");
+      li.className = "warn";
+      li.textContent = "提醒：" + t;
+      list.appendChild(li);
+    });
+    if (!rd.blockers.length && !rd.warnings.length) {
+      const li = document.createElement("li");
+      li.textContent = "无阻塞项与提醒项";
+      list.appendChild(li);
+    }
+
+    // 文件明细表
+    const body = $("files-body");
+    body.innerHTML = "";
+    files.files.forEach(f => {
+      const tr = document.createElement("tr");
+      const stateCell = f.ok
+        ? '<span class="ok-text">可用</span>'
+        : `<span class="bad-text">异常</span>`;
+      const required = f.required ? "" : ' <span class="mono">(可选)</span>';
+      tr.innerHTML = `
+        <td class="mono">${f.name}${required}</td>
+        <td>${stateCell}</td>
+        <td class="mono">${f.ok ? fmtSize(f) : "-"}</td>
+        <td class="mono">${fmtTime(f.updated_at)}</td>
+        <td class="mono ${f.ok ? "" : "bad-text"}">${f.issue || ""}</td>`;
+      body.appendChild(tr);
+    });
+
+    $("checked-at").textContent = "状态检测于 " + fmtTime(d.checked_at);
+  }
+
+  function loadStatus() {
+    fetch("/system/status")
+      .then(r => r.json())
+      .then(d => { if (d.success !== false) renderStatus(d); })
+      .catch(() => {
+        ["bank","files","capture","ready"].forEach(k => {
+          card($(k + "-card"), "offline");
+          pill($(k + "-pill"), "offline");
+          $(k + "-msg").textContent = "无法获取状态：" + "服务未响应";
+        });
+      });
+  }
+
+  // ---- 答题进度 ----
+  const els = Object.fromEntries(
+    ["status","stage","question","source","transport","similarity","message","bar","events"]
+      .map(id => [id, $(id)])
+  );
+  function render(event) {
+    const s = event.data || {};
+    els.status.textContent = s.status || "-";
+    els.stage.textContent = s.stage || "-";
+    els.question.textContent = s.question_id || "-";
+    els.source.textContent = s.answer_source || "-";
+    els.transport.textContent = s.transport || "-";
+    els.similarity.textContent = s.similarity == null ? "-" : Number(s.similarity).toFixed(4);
+    els.message.textContent = `${s.message || ""}  [${event.at || ""}]`;
+    const total = Number(s.total || 0), current = Number(s.current || 0);
+    els.bar.style.width = total > 0
+      ? `${Math.min(100, current / total * 100)}%`
+      : (s.status === "completed" ? "100%" : "8%");
+    const line = `[${event.at || ""}] ${event.event || "progress"} | ${s.stage || ""} | ${s.message || ""}`;
+    els.events.textContent = `${line}\n` + els.events.textContent;
+  }
+
+  loadStatus();
+  setInterval(loadStatus, 5000);
+
+  fetch("/progress").then(r => r.json()).then(x => (x.recent_events || []).forEach(render));
+  const stream = new EventSource("/progress/stream");
+  stream.onmessage = e => { try { render(JSON.parse(e.data)); } catch (_) {} };
+  setInterval(() => fetch("/progress").then(r => r.json()).then(x => render({
+    event: "poll", at: new Date().toISOString(), data: x.state
+  })), 5000);
+</script>
+</body>
+</html>
