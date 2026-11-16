@@ -56,8 +56,9 @@ try:
         TOP_K_DEFAULT,
     )
     _SEARCH_IMPORT_ERROR = None
-except ModuleNotFoundError as exc:
-    # 允许只启动 Charles MCP 接收端，安装模型依赖后再启用语义搜题。
+except (ModuleNotFoundError, OSError) as exc:
+    # 允许只启动 Charles MCP 接收端：缺依赖或原生库加载失败（如页面文件不足
+    # 导致 torch 的 WinError 1455）时降级为无向量检索，服务本身仍可启动。
     _SEARCH_IMPORT_ERROR = str(exc)
     SentenceTransformer = Any
     DATABASE_PATH = os.path.join(os.path.dirname(__file__), "database.json")
@@ -66,10 +67,10 @@ except ModuleNotFoundError as exc:
     TOP_K_DEFAULT = 5
 
     def load_database(*args, **kwargs):
-        raise RuntimeError(f"搜题依赖未安装: {_SEARCH_IMPORT_ERROR}")
+        raise RuntimeError(f"搜题引擎不可用: {_SEARCH_IMPORT_ERROR}")
 
     def build_or_load_embeddings(*args, **kwargs):
-        raise RuntimeError(f"搜题依赖未安装: {_SEARCH_IMPORT_ERROR}")
+        raise RuntimeError(f"搜题引擎不可用: {_SEARCH_IMPORT_ERROR}")
 
     def search_questions(*args, **kwargs):
         return []
