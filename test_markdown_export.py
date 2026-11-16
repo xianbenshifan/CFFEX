@@ -38,6 +38,22 @@ def main():
     assert server_index_to_letter(None) is None
     assert server_index_to_letter("") is None
 
+    # 提交序号：本地 0 基索引要按 SUBMIT_INDEX_BASE 转换。
+    import automation_runner
+
+    submitter = automation_runner.AnswerSubmitter(mcp=None)
+    assert submitter._submit_index({"answer_index": 0}) == 1
+    assert submitter._submit_index({"answer_index": 2}) == 3
+    assert submitter._submit_index({"answer": "B"}) == "B"
+
+    os.environ["SUBMIT_INDEX_BASE"] = "0"
+    try:
+        zero_base = automation_runner.AnswerSubmitter(mcp=None)
+        assert zero_base._submit_index({"answer_index": 0}) == 0
+        assert zero_base._submit_index({"answer_index": 2}) == 2
+    finally:
+        os.environ.pop("SUBMIT_INDEX_BASE", None)
+
     with tempfile.TemporaryDirectory() as folder:
         store = QuizCaptureStore(os.path.join(folder, "capture.db"))
         markdown_path = os.path.join(folder, "答题记录.md")
@@ -76,7 +92,8 @@ def main():
                 "request": {
                     "method": "POST",
                     "url": "https://TARGET/answer",
-                    "body": {"questionId": 456, "quizId": 7, "answerIndex": 0},
+                    # 1 基提交序号：A 记作 1
+                    "body": {"questionId": 456, "quizId": 7, "answerIndex": 1},
                 },
                 "response": {"status_code": 200, "body": answer_response},
             }

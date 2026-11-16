@@ -113,6 +113,25 @@ def _server_standard_answer(question: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _submitted_letter(value: Any) -> Optional[str]:
+    """把提交记录里的序号还原成选项字母。
+
+    提交序号按 1 基写入（服务器内部序号从 1 开始），0 基提交时
+    SUBMIT_INDEX_BASE=0，此时 0 表示 A。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    if len(text) == 1 and "A" <= text <= "Z":
+        return text
+    if text.isdigit():
+        index = int(text) - 1 if os.getenv("SUBMIT_INDEX_BASE", "1").strip() != "0" else int(text)
+        return chr(ord("A") + index) if 0 <= index < 26 else None
+    return None
+
+
 def _verdict_text(verdict: Any) -> str:
     """把服务器判定结果写成可读结论。"""
     if verdict is None:
@@ -191,9 +210,7 @@ def render_question(question: Dict[str, Any], submissions: List[Dict[str, Any]])
         lines.append("| 提交时间 | 提交的答案 | 服务器判定 |")
         lines.append("|---|---|---|")
         for item in submissions:
-            submitted = index_to_letter(item.get("submitted_answer")) or str(
-                item.get("submitted_answer") or ""
-            )
+            submitted = _submitted_letter(item.get("submitted_answer"))
             lines.append(
                 f"| {item.get('captured_at') or ''} | {submitted or '—'} | "
                 f"{_verdict_text(item.get('server_correct'))} |"

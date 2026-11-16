@@ -35,6 +35,22 @@ class AnswerSubmitter:
         )
         self.prefer_mcp = os.getenv("PREFER_CHARLES_MCP", "1") == "1"
         self.allow_direct = os.getenv("ALLOW_DIRECT_SUBMIT", "1") == "1"
+        # 提交序号基数：服务器把正确答案编码成 MD5(1..N)，说明内部序号从 1 开始，
+        # 因此默认按 1 基提交。若实测显示该接口接受 0 基，把 SUBMIT_INDEX_BASE 设为 0。
+        self.submit_index_base = 1
+        if os.getenv("SUBMIT_INDEX_BASE", "").strip() == "0":
+            self.submit_index_base = 0
+
+    def _submit_index(self, answer: Dict[str, Any]) -> Any:
+        """把本地 0 基推理索引转换为提交序号。"""
+        index = answer.get("answer_index")
+        if index is None or isinstance(index, bool):
+            # 没有可靠索引时退回答案字母，由服务端自行解释，避免凭空猜偏移。
+            return answer.get("answer")
+        try:
+            return int(index) + self.submit_index_base
+        except (TypeError, ValueError):
+            return answer.get("answer")
 
     def submit(
         self,
@@ -46,10 +62,8 @@ class AnswerSubmitter:
         body = {
             "questionId": question.get("question_id"),
             "quizId": question.get("quiz_id"),
-            "answerIndex": answer.get("answer_index"),
+            "answerIndex": self._submit_index(answer),
         }
-        if body["answerIndex"] is None:
-            body["answerIndex"] = answer.get("answer")
 
         if self.prefer_mcp and self.mcp:
             try:
@@ -215,7 +229,8 @@ class QuizAutomation:
                         "body": {
                             "questionId": question.get("question_id"),
                             "quizId": question.get("quiz_id"),
-                            "answerIndex": answer.get("answer_index"),
+                            # 归档要与真实提交一致，用转换后的序号。
+                            "answerIndex": self.submitter._submit_index(answer),
                         },
                     },
                     "response": {
