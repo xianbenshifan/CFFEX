@@ -1,0 +1,13 @@
+capture_data/
+__pycache__/
+*.pyc
+
+# 本机配置：含 API Key，只保留模板 .env.example
+.env
+
+# 模型权重与缓存：由 huggingface 另存，不入库（模板见 .env.example 上方说明）
+hf_cache/
+
+# 编辑器与本地状态
+.idea/
+.vscode/

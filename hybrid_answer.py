@@ -12,6 +12,8 @@ from typing import Any, Callable, Dict, Optional
 
 import requests
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,15 +49,14 @@ class HybridAnswerEngine:
         self.local_threshold = float(
             local_threshold
             if local_threshold is not None
-            else os.getenv("LOCAL_MATCH_THRESHOLD", "0.82")
+            else config.get_float("LOCAL_MATCH_THRESHOLD", 0.82)
         )
         # 唯一大模型平台：DeepSeek 官方 OpenAI 兼容接口。
-        self.llm_api_base = os.getenv(
-            "LLM_API_BASE",
-            "https://api.deepseek.com/v1",
+        self.llm_api_base = (
+            config.get("LLM_API_BASE", "https://api.deepseek.com/v1") or ""
         ).rstrip("/")
-        self.llm_api_key = os.getenv("DEEPSEEK_API_KEY", "")
-        self.llm_model = os.getenv("LLM_MODEL", "deepseek-flash")
+        self.llm_api_key = config.api_key("DEEPSEEK_API_KEY")
+        self.llm_model = config.get("LLM_MODEL", "deepseek-flash")
         self._exact_index: Dict[str, Dict[str, Any]] = {}
         self._load_exact_index(database_path)
 
@@ -158,7 +159,7 @@ class HybridAnswerEngine:
                 f"{self.llm_api_base}/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=float(os.getenv("LLM_TIMEOUT", "30")),
+                timeout=config.get_float("LLM_TIMEOUT", 30.0),
             )
             response.raise_for_status()
             body = response.json()

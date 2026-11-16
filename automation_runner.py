@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
+import config
 from capture_pipeline import CapturePipeline
 from capture_store import QuizCaptureStore
 from charles_mcp_adapter import CharlesMcpClient
@@ -29,17 +30,17 @@ class AnswerSubmitter:
 
     def __init__(self, mcp: Optional[CharlesMcpClient] = None) -> None:
         self.mcp = mcp
-        self.answer_url = os.getenv(
+        self.answer_url = config.get(
             "QUIZ_ANSWER_URL",
             "https://quiz-activity.eastmoney.com/qa/api/quiz/answer",
         )
-        self.prefer_mcp = os.getenv("PREFER_CHARLES_MCP", "1") == "1"
-        self.allow_direct = os.getenv("ALLOW_DIRECT_SUBMIT", "1") == "1"
+        self.prefer_mcp = config.get_int("PREFER_CHARLES_MCP", 1) == 1
+        self.allow_direct = config.get_int("ALLOW_DIRECT_SUBMIT", 1) == 1
         # 提交序号基数：服务器把正确答案编码成 MD5(1..N)，说明内部序号从 1 开始，
         # 因此默认按 1 基提交。若实测显示该接口接受 0 基，把 SUBMIT_INDEX_BASE 设为 0。
-        self.submit_index_base = 1
-        if os.getenv("SUBMIT_INDEX_BASE", "").strip() == "0":
-            self.submit_index_base = 0
+        self.submit_index_base = config.get_int("SUBMIT_INDEX_BASE", 1)
+        if self.submit_index_base not in (0, 1):
+            self.submit_index_base = 1
 
     def _submit_index(self, answer: Dict[str, Any]) -> Any:
         """把本地 0 基推理索引转换为提交序号。"""
@@ -67,7 +68,7 @@ class AnswerSubmitter:
 
         if self.prefer_mcp and self.mcp:
             try:
-                tool = os.getenv("CHARLES_MCP_SUBMIT_TOOL", "send_request")
+                tool = config.get("CHARLES_MCP_SUBMIT_TOOL", "send_request")
                 result = self.mcp.call_tool(
                     tool,
                     {
@@ -92,15 +93,15 @@ class AnswerSubmitter:
         headers.pop("Host", None)
         headers.pop("Content-Length", None)
         # 默认直连目标站点；需要走抓包代理时显式设置 SUBMIT_PROXY_URL。
-        submit_proxy = os.getenv("SUBMIT_PROXY_URL")
+        submit_proxy = config.get("SUBMIT_PROXY_URL")
         proxies = {"http": submit_proxy, "https": submit_proxy} if submit_proxy else {}
         try:
             response = requests.post(
                 self.answer_url,
                 json=body,
                 headers=headers,
-                timeout=float(os.getenv("SUBMIT_TIMEOUT", "15")),
-                verify=os.getenv("VERIFY_TLS", "0") == "1",
+                timeout=config.get_float("SUBMIT_TIMEOUT", 15.0),
+                verify=config.get_int("VERIFY_TLS", 0) == 1,
                 proxies=proxies or None,
             )
         except requests.RequestException as exc:
@@ -146,7 +147,7 @@ class QuizAutomation:
         current = self.pipeline.ingest(envelope, source="charles_mcp_automation")
         first_result = current
         steps = []
-        max_steps = max(1, int(os.getenv("MAX_AUTO_QUESTIONS", "100")))
+        max_steps = max(1, config.get_int("MAX_AUTO_QUESTIONS", 100))
 
         for _ in range(max_steps):
             question = current.get("question")
@@ -267,7 +268,7 @@ def main() -> None:
     """命令行模式：从 stdin 读取 JSON 抓包信封，每行处理一条。"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     store = QuizCaptureStore()
-    mcp = CharlesMcpClient() if os.getenv("CHARLES_MCP_URL") else None
+    mcp = CharlesMcpClient() if config.get("CHARLES_MCP_URL") else None
     automation = QuizAutomation(store=store, mcp=mcp)
     for line in os.sys.stdin:
         line = line.strip()

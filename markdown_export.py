@@ -18,15 +18,16 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from capture_store import QuizCaptureStore
+import config
 
 
 def default_markdown_path() -> str:
     """返回答题记录的 Markdown 落盘路径。
 
-    优先读环境变量 ANSWER_MD_PATH；否则放在 capture_data 下，
+    优先读配置项 ANSWER_MD_PATH；否则放在 capture_data 下，
     与 SQLite 归档同目录（该目录已被 .gitignore 忽略）。
     """
-    configured = os.getenv("ANSWER_MD_PATH")
+    configured = config.get("ANSWER_MD_PATH")
     if configured:
         return os.path.abspath(configured)
     root = os.path.dirname(os.path.abspath(__file__))
@@ -127,7 +128,8 @@ def _submitted_letter(value: Any) -> Optional[str]:
     if len(text) == 1 and "A" <= text <= "Z":
         return text
     if text.isdigit():
-        index = int(text) - 1 if os.getenv("SUBMIT_INDEX_BASE", "1").strip() != "0" else int(text)
+        base = config.get_int("SUBMIT_INDEX_BASE", 1)
+        index = int(text) - base if base == 1 else int(text)
         return chr(ord("A") + index) if 0 <= index < 26 else None
     return None
 

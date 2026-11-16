@@ -93,14 +93,18 @@ $env:CHARLES_MCP_EXPORT_TOOL = "charles_export_capture"
 
 ## 答案路由配置
 
-```powershell
-$env:LOCAL_MATCH_THRESHOLD = "0.82"
-$env:DEEPSEEK_API_KEY = "你的 DeepSeek API Key"
-$env:LLM_MODEL = "deepseek-flash"
-$env:LLM_TIMEOUT = "30"
-$env:CHARLES_MCP_URL = "http://127.0.0.1:PORT/mcp"
-$env:CHARLES_MCP_SUBMIT_TOOL = "send_request"
+配置写在项目根 `.env`（模板见 `.env.example`），改完重启服务生效：
+
+```text
+LOCAL_MATCH_THRESHOLD=0.82
+DEEPSEEK_API_KEY=你的 DeepSeek API Key
+LLM_MODEL=deepseek-flash
+LLM_TIMEOUT=30
+SUBMIT_INDEX_BASE=1
 ```
+
+`CHARLES_MCP_URL` 与 `CHARLES_MCP_SUBMIT_TOOL` 同样可写进 `.env`。
+真实环境变量优先于 `.env`，临时覆盖无需改文件。
 
 大模型只接 DeepSeek 官方一个平台（`LLM_API_BASE` 默认
 `https://api.deepseek.com/v1`）。

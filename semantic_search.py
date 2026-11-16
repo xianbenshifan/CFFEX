@@ -1,6 +1,15 @@
 import json
 import os
 from typing import List, Dict, Any
+
+# 先加载 .env，让 HF 缓存路径等配置项从统一文件读取。
+try:
+    import config as _config
+
+    _config.load_env()
+except ImportError:
+    _config = None
+
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 # 代理只在显式设置 PROXY_URL 时启用。默认不挂代理，否则进程内所有 requests

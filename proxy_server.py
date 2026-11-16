@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional
 from flask import Flask, request, jsonify, Response, send_file
 import requests
 from flask_cors import CORS
+import config
 from capture_pipeline import CapturePipeline
 from capture_store import QuizCaptureStore
 from markdown_export import default_markdown_path, export_markdown
@@ -276,7 +277,7 @@ def get_automation_runner():
         from automation_runner import QuizAutomation
         from charles_mcp_adapter import CharlesMcpClient
 
-        mcp = CharlesMcpClient() if os.getenv("CHARLES_MCP_URL") else None
+        mcp = CharlesMcpClient() if config.get("CHARLES_MCP_URL") else None
         _automation_runner = QuizAutomation(
             store=_capture_store,
             local_resolver=search_answer,
@@ -638,7 +639,7 @@ def receive_charles_mcp_capture():
         if not isinstance(payload, dict):
             return jsonify({"success": False, "error": "请求体必须是 JSON 对象"}), 400
         # 默认开启完整编排；提交通道由 automation_runner 按 MCP 配置决定。
-        if os.getenv("AUTO_SUBMIT", "1") == "1":
+        if config.get_int("AUTO_SUBMIT", 1) == 1:
             result = get_automation_runner().handle_capture(payload)
         else:
             result = ingest_capture(payload, source="charles_mcp")
@@ -923,8 +924,8 @@ if __name__ == '__main__':
         exit(1)
     
     # 启动服务器
-    host = os.getenv('PROXY_HOST', '0.0.0.0')
-    port = int(os.getenv('PROXY_PORT', '8889'))  # 默认8889，避免与Charles冲突
+    host = config.get("PROXY_HOST", "0.0.0.0")
+    port = config.get_int("PROXY_PORT", 8889)
     
     logger.info("=" * 60)
     logger.info("东方财富答题镜像服务启动")
