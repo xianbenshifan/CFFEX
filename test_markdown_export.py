@@ -5,7 +5,10 @@ import tempfile
 
 from capture_pipeline import CapturePipeline
 from capture_store import QuizCaptureStore
-from markdown_export import export_markdown, index_to_letter
+from markdown_export import export_markdown, index_to_letter, server_index_to_letter
+
+# 真实抓包里 rightIndex 的取值：MD5(1 基序号)，不是数字。
+RIGHT_B = "C81E728D9D4C2F636F067F89CC14862C"
 
 
 def fake_resolver(question_text):
@@ -26,6 +29,15 @@ def main():
     assert index_to_letter("c") == "C"
     assert index_to_letter(None) is None
 
+    # 服务器标准答案：rightIndex 是 MD5(1 基序号)，不能按 0 基或纯数字解析。
+    assert server_index_to_letter(RIGHT_B) == "B"
+    assert server_index_to_letter("C4CA4238A0B923820DCC509A6F75849B") == "A"
+    assert server_index_to_letter("ECCBC87E4B5CE2FE28308FD9F2A7BAF3") == "C"
+    assert server_index_to_letter("A87FF679A2F3E71D9181A67B7542122C") == "D"
+    assert server_index_to_letter("2") == "B"  # 数字串按 1 基
+    assert server_index_to_letter(None) is None
+    assert server_index_to_letter("") is None
+
     with tempfile.TemporaryDirectory() as folder:
         store = QuizCaptureStore(os.path.join(folder, "capture.db"))
         markdown_path = os.path.join(folder, "答题记录.md")
@@ -40,7 +52,7 @@ def main():
                     "questionTitle": "中金所股指期货最小变动价位是多少",
                     "answers": ["0.2 点", "0.5 点"],
                     "type": "S",
-                    "analysis": "服务器待判解析",
+                    "analysis": None,
                 },
             },
         }
@@ -55,8 +67,8 @@ def main():
             "success": True,
             "data": {
                 "correct": False,
-                "analysis": "本题考查合约乘数与报价单位，正确答案为 B。",
-                "rightIndex": 1,
+                "analysis": None,
+                "rightIndex": RIGHT_B,
             },
         }
         pipeline.ingest(
@@ -80,7 +92,6 @@ def main():
         assert "local_semantic" in document
         assert "0.8700" in document
         assert "标准答案：**B**" in document
-        assert "本题考查合约乘数与报价单位" in document
         assert "回答错误" in document
         assert "| A |" in document
         assert "| 回答错误 |" in document

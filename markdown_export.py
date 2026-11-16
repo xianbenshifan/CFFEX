@@ -11,6 +11,7 @@ Markdown 是数据库的投影：每次调用都按当前数据库内容整体�
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from datetime import datetime
@@ -33,10 +34,8 @@ def default_markdown_path() -> str:
 
 
 def index_to_letter(value: Any) -> Optional[str]:
-    """把 0-based 索引或字母统一成大写选项字母。"""
-    if value is None:
-        return None
-    if isinstance(value, bool):
+    """把本地推断的 0-based 索引或字母统一成大写选项字母。"""
+    if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
         return chr(ord("A") + value) if 0 <= value < 26 else None
@@ -49,6 +48,37 @@ def index_to_letter(value: Any) -> Optional[str]:
         index = int(text)
         return chr(ord("A") + index) if 0 <= index < 26 else None
     return None
+
+
+# 服务器把标准答案编码成 MD5(序号)，序号从 1 开始。
+# 实测 151 条抓包全部落在 1..选项数，按 1 基解释 151/151 合法、按 0 基仅 103/151。
+_SERVER_INDEX_DIGESTS = {
+    hashlib.md5(str(index).encode()).hexdigest().upper(): index for index in range(1, 27)
+}
+
+
+def server_index_to_letter(value: Any) -> Optional[str]:
+    """把服务器返回的标准答案解码成选项字母。
+
+    服务器字段有两种形态：
+    - rightIndex：MD5(1 基序号)，如 C4CA4238... 对应 1，即 A；
+    - answerIndex / correctAnswerIndex：1 基序号，如 2 表示 B。
+
+    两者都是 1 基，所以 0 与空值一律返回 None，不猜 A。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    if len(text) == 1 and "A" <= text <= "Z":
+        return text
+    index = _SERVER_INDEX_DIGESTS.get(text)
+    if index is None and text.isdigit():
+        index = int(text)
+    if index is None or not 1 <= index <= 26:
+        return None
+    return chr(ord("A") + index - 1)
 
 
 def _option_lines(options: Any) -> List[str]:
@@ -72,26 +102,26 @@ def _option_lines(options: Any) -> List[str]:
 def _server_standard_answer(question: Dict[str, Any]) -> Optional[str]:
     """取服务器给出的标准答案字母。
 
-    server_correct_index 是题目接口带回的 answerIndex，可能是用户上次的选择，
-    不能当作正确答案；标准答案只认提交响应里的正确答案字段。
+    只看提交响应回写的两个字段：answerIndex / correctAnswerIndex / rightAnswerIndex
+    落到 server_answer_index，rightIndex 落到 server_right_index。
+    题目接口带回的 server_correct_index 是用户上次的选择，不能当作标准答案。
     """
     for field in ("server_answer_index", "server_right_index"):
-        letter = index_to_letter(question.get(field))
+        letter = server_index_to_letter(question.get(field))
         if letter:
             return letter
     return None
 
 
-def _verdict_text(question: Dict[str, Any]) -> str:
+def _verdict_text(verdict: Any) -> str:
     """把服务器判定结果写成可读结论。"""
-    correct = question.get("server_correct")
-    if correct is None:
+    if verdict is None:
         return "未知（服务器尚未返回判定）"
-    if correct in (1, "1", "true", "True", True):
+    if verdict in (1, "1", "true", "True", True):
         return "回答正确"
-    if correct in (0, "0", "false", "False", False):
+    if verdict in (0, "0", "false", "False", False):
         return "回答错误"
-    return str(correct)
+    return str(verdict)
 
 
 def render_question(question: Dict[str, Any], submissions: List[Dict[str, Any]]) -> str:
@@ -150,7 +180,7 @@ def render_question(question: Dict[str, Any], submissions: List[Dict[str, Any]])
     standard = _server_standard_answer(question)
     lines.append(f"标准答案：**{standard}**" if standard else "标准答案：服务器未返回")
     lines.append("")
-    lines.append(f"提交判定：{_verdict_text(question)}")
+    lines.append(f"提交判定：{_verdict_text(question.get('server_correct'))}")
     if question.get("server_analysis"):
         lines.extend(["", f"服务器解析：{question.get('server_analysis')}"])
     lines.append("")
@@ -166,7 +196,7 @@ def render_question(question: Dict[str, Any], submissions: List[Dict[str, Any]])
             )
             lines.append(
                 f"| {item.get('captured_at') or ''} | {submitted or '—'} | "
-                f"{_verdict_text(item)} |"
+                f"{_verdict_text(item.get('server_correct'))} |"
             )
         lines.append("")
 
