@@ -647,12 +647,12 @@ def get_cache():
 
 @app.route('/mcp/charles/capture', methods=['POST'])
 def receive_charles_mcp_capture():
-    """接收 Charles MCP bridge 推送的标准抓包信封。"""
+    """接收外部推送的标准抓包信封。"""
     try:
         payload = request.get_json(silent=True) or {}
         if not isinstance(payload, dict):
             return jsonify({"success": False, "error": "请求体必须是 JSON 对象"}), 400
-        # 默认开启完整编排；提交通道由 automation_runner 按 MCP 配置决定。
+        # 默认开启完整编排；提交通道一律直连目标 API。
         if config.get_int("AUTO_SUBMIT", 1) == 1:
             result = get_automation_runner().handle_capture(payload)
         else:
@@ -661,6 +661,55 @@ def receive_charles_mcp_capture():
     except Exception as exc:
         logger.error("[Charles MCP] 抓包处理失败: %s", exc, exc_info=True)
         return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route('/mcp/capture/start', methods=['POST'])
+def mcp_capture_start():
+    """启动 MCP 收题：轮询 Charles 抓包并自动处理题目。"""
+    try:
+        from mcp_capture import get_poller
+
+        poller = get_poller(handler=_handle_mcp_envelope)
+        return jsonify({"success": True, **poller.start()})
+    except Exception as exc:
+        logger.error("[收题] 启动失败: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route('/mcp/capture/stop', methods=['POST'])
+def mcp_capture_stop():
+    """停止 MCP 收题。"""
+    try:
+        from mcp_capture import get_poller
+
+        return jsonify({"success": True, **get_poller().stop()})
+    except Exception as exc:
+        logger.error("[收题] 停止失败: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route('/mcp/capture/status', methods=['GET'])
+def mcp_capture_status():
+    """查看 MCP 收题当前状态。"""
+    from mcp_capture import get_poller
+
+    poller = get_poller()
+    return jsonify(
+        {
+            "success": True,
+            "running": poller.running,
+            "capture_id": poller.capture_id,
+            "interval": poller.interval,
+            "stats": dict(poller.stats),
+        }
+    )
+
+
+def _handle_mcp_envelope(envelope):
+    """把 MCP 收到的信封交给自动答题编排。"""
+    if config.get_int("AUTO_SUBMIT", 1) == 1:
+        return get_automation_runner().handle_capture(envelope)
+    return ingest_capture(envelope, source="charles_mcp_poll")
 
 
 @app.route('/captures', methods=['GET'])

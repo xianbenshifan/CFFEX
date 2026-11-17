@@ -141,33 +141,59 @@ class CharlesMcpClient:
         """读取 Charles 连接状态。"""
         return self.call_tool("charles_status", {})
 
-    def start_capture(self, reset_session: bool = True, adopt_existing: bool = False) -> Any:
+    def start_capture(
+        self,
+        reset_session: bool = True,
+        include_existing: bool = False,
+        adopt_existing: bool = False,
+    ) -> Any:
         """启动或接管实时抓包，返回结果里含后续调用需要的 capture_id。"""
         return self.call_tool(
             "start_live_capture",
-            {"reset_session": reset_session, "adopt_existing": adopt_existing},
+            {
+                "reset_session": reset_session,
+                "include_existing": include_existing,
+                "adopt_existing": adopt_existing,
+            },
         )
 
     def stop_capture(self, capture_id: str, persist: bool = True) -> Any:
         """停止抓包会话。"""
         return self.call_tool("stop_live_capture", {"capture_id": capture_id, "persist": persist})
 
+    def read_entries(self, capture_id: str, cursor: Optional[int] = None, limit: int = 50) -> Any:
+        """读取增量抓包并推进游标。"""
+        args: Dict[str, Any] = {"capture_id": capture_id, "limit": limit}
+        if cursor is not None:
+            args["cursor"] = cursor
+        return self.call_tool("read_live_capture", args)
+
+    def peek_entries(self, capture_id: str, cursor: Optional[int] = None, limit: int = 50) -> Any:
+        """预览增量抓包但不推进游标。"""
+        args: Dict[str, Any] = {"capture_id": capture_id, "limit": limit}
+        if cursor is not None:
+            args["cursor"] = cursor
+        return self.call_tool("peek_live_capture", args)
+
     def query_entries(
         self,
         capture_id: str,
         host_contains: Optional[str] = None,
         path_contains: Optional[str] = None,
-        cursor: int = 0,
+        cursor: Optional[int] = None,
         max_items: int = 10,
         include_body_preview: bool = True,
+        max_preview_chars: int = 512,
     ) -> Any:
         """按条件查询实时抓包条目。"""
         args: Dict[str, Any] = {
             "capture_id": capture_id,
-            "cursor": cursor,
             "max_items": max_items,
             "include_body_preview": include_body_preview,
+            "max_preview_chars": max_preview_chars,
         }
+        if cursor is not None:
+            args["cursor"] = cursor
         if host_contains:
             args["host_contains"] = host_contains
         if path_contains:
