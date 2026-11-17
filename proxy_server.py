@@ -887,8 +887,8 @@ def automation_latest():
     bank_index = item.get("bank_answer_index")
     llm_index = item.get("llm_answer_index")
 
-    def pick_text(opts, idx, fallback_letter):
-        """按索引取选项文本，取不到就返回空串。"""
+    def pick_text(opts, idx, answer):
+        """按索引取选项文本；多选题没有单一索引，改按字母串拼出全部选中项。"""
         if idx is not None:
             try:
                 i = int(idx)
@@ -896,6 +896,14 @@ def automation_latest():
                     return opts[i]["text"]
             except (TypeError, ValueError):
                 pass
+        letters = [ch for ch in str(answer or "").upper() if "A" <= ch <= "Z"]
+        if len(letters) > 1:
+            parts = []
+            for ch in letters:
+                i = ord(ch) - 65
+                if 0 <= i < len(opts):
+                    parts.append(f"{ch}. {opts[i]['text']}")
+            return "　".join(parts)
         return ""
 
     return jsonify(
@@ -916,15 +924,15 @@ def automation_latest():
                         "matched_question": item.get("bank_matched_question"),
                         "matched_number": item.get("bank_matched_number"),
                         "matched_options": bank_options,
-                        "answer_text": pick_text(options, bank_index, None)
-                        or pick_text(bank_options, bank_index, None),
+                        "answer_text": pick_text(options, bank_index, item.get("bank_answer"))
+                        or pick_text(bank_options, bank_index, item.get("bank_answer")),
                     },
                     "llm": {
                         "answer": item.get("llm_answer"),
                         "answer_index": llm_index,
                         "confidence": item.get("llm_confidence"),
                         "explanation": item.get("llm_explanation"),
-                        "answer_text": pick_text(options, llm_index, None),
+                        "answer_text": pick_text(options, llm_index, item.get("llm_answer")),
                     },
                 },
             },

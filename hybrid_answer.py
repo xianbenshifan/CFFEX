@@ -207,8 +207,12 @@ class HybridAnswerEngine:
             return None
         option_text = self._format_options(options)
         prompt = (
-            "请分析下面的选择题，只返回 JSON，不要返回 Markdown。"
-            'JSON 格式：{"answer":"A","answer_index":0,"explanation":"...","confidence":0.0}。'
+            "请分析下面的选择题，只返回 JSON，不要返回 Markdown。\n"
+            "规则：\n"
+            "1. 单选题只填一个字母；多选题把所有正确项的字母连写，按字母升序，"
+            "例如 ABD，不要加逗号或空格。\n"
+            "2. answer_index 仅在单选题时填 0 开始的序号，多选题固定填 null。\n"
+            '3. 返回格式：{"answer":"A","answer_index":0,"explanation":"...","confidence":0.0}\n'
             f"\n题目：{question_text}\n选项：{option_text}"
         )
         headers = {"Content-Type": "application/json"}
@@ -230,7 +234,8 @@ class HybridAnswerEngine:
                 f"{self.llm_api_base}/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=config.get_float("LLM_TIMEOUT", 30.0),
+                # 实测 DeepSeek 思考模式单次 11~24 秒，默认 30 秒容易在波动时超时。
+                timeout=config.get_float("LLM_TIMEOUT", 60.0),
             )
             response.raise_for_status()
             body = response.json()
@@ -238,13 +243,26 @@ class HybridAnswerEngine:
             result = self._parse_json(content)
             if not result.get("answer"):
                 return None
-            result["answer_index"] = result.get("answer_index")
-            if result["answer_index"] is None:
-                result["answer_index"] = answer_index(result.get("answer"), options)
+
+            # 归一化答案：大写、只保留字母、去重并按字母升序，多选因此稳定成 ABD 形式
+            raw_answer = str(result.get("answer") or "")
+            letters = sorted({ch for ch in raw_answer.upper() if "A" <= ch <= "Z"})
+            if not letters:
+                return None
+            result["answer"] = "".join(letters)
+
+            # 多选没有单一索引；单选才换算
+            if len(letters) == 1:
+                if result.get("answer_index") is None:
+                    result["answer_index"] = answer_index(result["answer"], options)
+            else:
+                result["answer_index"] = None
+
             result["answer_source"] = "llm_api"
             result["similarity"] = float(result.get("confidence") or 0)
             return result
-        except (OSError, requests.RequestException, KeyError, ValueError, TypeError):
+        except (OSError, requests.RequestException, KeyError, ValueError, TypeError) as exc:
+            logger.warning("LLM 解析失败: %s", exc)
             return None
 
     @staticmethod
