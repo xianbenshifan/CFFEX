@@ -70,6 +70,24 @@ def main():
     assert env4["response"]["body"]["data"]["nextQuestion"]["questionId"] == 2
     print("   ok:", env4["response"]["body"])
 
+    print("=== 6. 轮询间隔可运行时调整并做边界钳制 ===")
+    from mcp_capture import McpCapturePoller
+
+    poller = McpCapturePoller(handler=None, endpoint="http://127.0.0.1:1/mcp")
+    assert poller.MIN_INTERVAL == 0.2
+    assert poller.MAX_INTERVAL == 60.0
+
+    r = poller.set_interval(0.5)
+    assert r["interval"] == 0.5 and r["clamped"] is False
+    assert poller.interval == 0.5
+
+    # 过小应钳到下限，过大应钳到上限
+    assert poller.set_interval(0)["interval"] == 0.2
+    assert poller.set_interval(999)["interval"] == 60.0
+    # 非法输入回落默认 1 秒
+    assert poller.set_interval("abc")["interval"] == 1.0
+    print("   ok: 0.5 / 0→0.2 / 999→60 / abc→1.0")
+
     print("mcp capture test passed")
 
 

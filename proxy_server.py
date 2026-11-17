@@ -717,9 +717,29 @@ def mcp_capture_status():
             "running": poller.running,
             "capture_id": poller.capture_id,
             "interval": poller.interval,
+            "min_interval": poller.MIN_INTERVAL,
+            "max_interval": poller.MAX_INTERVAL,
             "stats": dict(poller.stats),
         }
     )
+
+
+@app.route('/mcp/capture/interval', methods=['POST'])
+def mcp_capture_set_interval():
+    """运行时调整轮询间隔（秒），立即生效且无需重启。"""
+    from mcp_capture import get_poller
+
+    payload = request.get_json(silent=True) or {}
+    raw = payload.get("interval", payload.get("seconds"))
+    if raw is None:
+        return jsonify({"success": False, "error": "缺少 interval 参数"}), 400
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": f"interval 不是数字: {raw}"}), 400
+
+    result = get_poller().set_interval(value)
+    return jsonify({"success": True, **result})
 
 
 def _handle_mcp_envelope(envelope):

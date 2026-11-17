@@ -125,16 +125,25 @@ def is_quiz_answer(entry_or_envelope: Dict[str, Any]) -> bool:
 
 
 class McpCapturePoller:
-    """持续拉取 Charles MCP 的增量抓包并交给处理函数。"""
+    """持续拉取 Charles MCP 的增量抓包并交给处理函数。
+
+    实测单次 query_entries 约 0.21 秒（本地 HTTP + 已有抓包会话），
+    因此轮询间隔可以设得很短；间隔在运行时可调，无需重启。
+    """
+
+    MIN_INTERVAL = 0.2
+    MAX_INTERVAL = 60.0
 
     def __init__(self, handler=None, endpoint: Optional[str] = None) -> None:
         self.handler = handler
         self.endpoint = endpoint or config.get("CHARLES_MCP_URL")
-        self.interval = float(config.get_float("MCP_POLL_INTERVAL", 2.0))
+        self._interval = self._clamp(config.get_float("MCP_POLL_INTERVAL", 1.0))
         self.running = False
         self.capture_id: Optional[str] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # 间隔变化时唤醒等待，让新值立即生效
+        self._wake = threading.Event()
         self.stats: Dict[str, Any] = {
             "started_at": None,
             "polls": 0,
@@ -143,6 +152,42 @@ class McpCapturePoller:
             "answers": 0,
             "last_error": None,
             "last_poll_at": None,
+            "last_poll_duration": None,
+        }
+
+    # ---- 间隔 ----
+
+    @classmethod
+    def _clamp(cls, value: float) -> float:
+        """把间隔限制在合理范围，避免 0 造成空转。"""
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        return max(cls.MIN_INTERVAL, min(cls.MAX_INTERVAL, value))
+
+    @property
+    def interval(self) -> float:
+        """当前轮询间隔（秒）。"""
+        return self._interval
+
+    def set_interval(self, value: float) -> Dict[str, Any]:
+        """运行时调整轮询间隔，立即生效。非法输入回落到默认值。"""
+        try:
+            requested = float(value)
+        except (TypeError, ValueError):
+            requested = None
+
+        clamped = self._clamp(requested if requested is not None else 1.0)
+        old = self._interval
+        self._interval = clamped
+        self._wake.set()
+        logger.info("[收题] 轮询间隔 %s -> %s 秒", old, clamped)
+        return {
+            "interval": clamped,
+            "previous": old,
+            "clamped": requested is None or clamped != requested,
+            "invalid": requested is None,
         }
 
     # ---- 生命周期 ----
@@ -165,6 +210,7 @@ class McpCapturePoller:
         self.capture_id = capture_id
         self.running = True
         self._stop.clear()
+        self._wake.clear()
         self.stats["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         self._thread = threading.Thread(target=self._loop, daemon=True, name="mcp-capture-poller")
         self._thread.start()
@@ -176,6 +222,7 @@ class McpCapturePoller:
         if not self.running:
             return {"status": "not_running"}
         self._stop.set()
+        self._wake.set()  # 立刻打断等待，避免最长 60 秒的延迟
         self.running = False
         if self.capture_id:
             try:
@@ -197,12 +244,16 @@ class McpCapturePoller:
 
         client = CharlesMcpClient(endpoint=self.endpoint, timeout=30)
         while not self._stop.is_set():
+            started = time.time()
             try:
                 self._poll_once(client)
+                self.stats["last_poll_duration"] = round(time.time() - started, 3)
             except Exception as exc:
                 self.stats["last_error"] = f"{type(exc).__name__}: {exc}"
                 logger.warning("[收题] 轮询失败: %s", exc)
-            self._stop.wait(self.interval)
+            # 用可唤醒的等待代替 sleep：改间隔后立即按新值继续
+            self._wake.wait(self._interval)
+            self._wake.clear()
 
     def _poll_once(self, client) -> None:
         """拉一次增量并分发。"""

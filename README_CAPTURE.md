@@ -116,6 +116,28 @@ SUBMIT_INDEX_BASE=1
 - **提交**：一律直连目标 API。`charles-mcp` 没有能凭空发出新请求的工具
   （`reverse_replay_entry` 只能重放已有抓包条目），因此不存在 MCP 提交通道。
 
+## 收题靠轮询
+
+Charles Web API 与 `charles-mcp` 都只提供查询接口，没有 websocket / webhook / 回调，
+因此发现新题只能轮询。实测单次 `query_entries` 约 0.21 秒（本地 HTTP + 已有抓包会话），
+所以间隔可以设得很短。
+
+间隔在运行时可调，改完立即生效、无需重启：
+
+```powershell
+# 查看当前间隔与实测轮询次数
+curl http://127.0.0.1:8889/mcp/capture/status
+
+# 调到 0.5 秒
+curl -X POST http://127.0.0.1:8889/mcp/capture/interval -H "Content-Type: application/json" -d '{"interval":0.5}'
+```
+
+允许范围 0.2–60 秒，超出会被钳制；非法值回落到 1 秒。
+
+实际周期 = 间隔 + 单次查询耗时。设 0.5 秒时实测约 0.75 秒一次。
+
+`.env` 里的 `MCP_POLL_INTERVAL` 只在启动收题时读取，运行中改它不生效。
+
 每道题的 `answer_source` 会标记为：
 
 - `local_exact`：题干精确命中本地题库；
