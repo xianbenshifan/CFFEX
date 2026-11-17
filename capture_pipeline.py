@@ -173,6 +173,9 @@ class CapturePipeline:
         bank_source = None
         bank_similarity = None
         bank_explanation = None
+        bank_matched_question = None
+        bank_matched_number = None
+        bank_matched_options = None
         llm_answer = None
         llm_index = None
         llm_explanation = None
@@ -197,6 +200,12 @@ class CapturePipeline:
                     bank_source = bank.get("answer_source", "local_database")
                     bank_similarity = bank.get("similarity")
                     bank_explanation = bank.get("explanation")
+                    # 保留题库里匹配到的那道题，便于对照题干与选项差异
+                    bank_matched_question = bank.get("matched_question")
+                    bank_matched_number = bank.get("matched_number")
+                    bank_matched_options = bank.get("matched_options")
+                    if bank_matched_options is None:
+                        bank_matched_options = bank.get("options")
                 if llm:
                     llm_answer = llm.get("answer")
                     llm_index = llm.get("answer_index")
@@ -248,6 +257,9 @@ class CapturePipeline:
             "bank_source": bank_source,
             "bank_similarity": bank_similarity,
             "bank_explanation": bank_explanation,
+            "bank_matched_question": bank_matched_question,
+            "bank_matched_number": bank_matched_number,
+            "bank_matched_options": bank_matched_options,
             "llm_answer": llm_answer,
             "llm_answer_index": llm_index,
             "llm_explanation": llm_explanation,

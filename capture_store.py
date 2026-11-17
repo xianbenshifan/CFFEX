@@ -146,6 +146,9 @@ class QuizCaptureStore:
                     "bank_source": "TEXT",
                     "bank_similarity": "REAL",
                     "bank_explanation": "TEXT",
+                    "bank_matched_question": "TEXT",
+                    "bank_matched_number": "TEXT",
+                    "bank_matched_options_json": "TEXT",
                     "llm_answer": "TEXT",
                     "llm_answer_index": "INTEGER",
                     "llm_explanation": "TEXT",
@@ -229,11 +232,13 @@ class QuizCaptureStore:
                         inferred_answer_index, similarity, answer_source,
                         bank_answer, bank_answer_index, bank_source,
                         bank_similarity, bank_explanation,
+                        bank_matched_question, bank_matched_number, bank_matched_options_json,
                         llm_answer, llm_answer_index, llm_explanation, llm_confidence,
                         first_seen, last_seen, capture_id, raw_json
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?,
                         ?, ?, ?, ?
                     )
                     ON CONFLICT(question_id) DO UPDATE SET
@@ -276,6 +281,15 @@ class QuizCaptureStore:
                         bank_explanation = COALESCE(
                             excluded.bank_explanation, questions.bank_explanation
                         ),
+                        bank_matched_question = COALESCE(
+                            excluded.bank_matched_question, questions.bank_matched_question
+                        ),
+                        bank_matched_number = COALESCE(
+                            excluded.bank_matched_number, questions.bank_matched_number
+                        ),
+                        bank_matched_options_json = COALESCE(
+                            excluded.bank_matched_options_json, questions.bank_matched_options_json
+                        ),
                         llm_answer = COALESCE(excluded.llm_answer, questions.llm_answer),
                         llm_answer_index = COALESCE(
                             excluded.llm_answer_index, questions.llm_answer_index
@@ -312,6 +326,11 @@ class QuizCaptureStore:
                         question.get("bank_source"),
                         question.get("bank_similarity"),
                         question.get("bank_explanation"),
+                        question.get("bank_matched_question"),
+                        question.get("bank_matched_number"),
+                        json_text(question.get("bank_matched_options"))
+                        if question.get("bank_matched_options") is not None
+                        else None,
                         question.get("llm_answer"),
                         question.get("llm_answer_index"),
                         question.get("llm_explanation"),
@@ -507,6 +526,9 @@ class QuizCaptureStore:
             "bank_source": row["bank_source"],
             "bank_similarity": row["bank_similarity"],
             "bank_explanation": row["bank_explanation"],
+            "bank_matched_question": row["bank_matched_question"],
+            "bank_matched_number": row["bank_matched_number"],
+            "bank_matched_options": safe_json(row["bank_matched_options_json"], None),
             "llm_answer": row["llm_answer"],
             "llm_answer_index": row["llm_answer_index"],
             "llm_explanation": row["llm_explanation"],

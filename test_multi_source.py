@@ -111,6 +111,41 @@ def main():
     assert "bank" in out and "llm" in out and "agree" in out
     print(f"   bank={out['bank']}  llm有值={out['llm'] is not None}  agree={out['agree']}")
 
+    print("=== 5. 匹配到的题库原题与选项要完整入库 ===")
+    with tempfile.TemporaryDirectory() as folder:
+        store = QuizCaptureStore(os.path.join(folder, "c.db"))
+        engine = FakeEngine(
+            {
+                "answer": "ABD",
+                "answer_index": None,  # 多选题没有单一索引
+                "answer_source": "local_exact",
+                "similarity": 1.0,
+                "matched_question": "题库里的原题",
+                "matched_number": "11",
+                "matched_options": {"A": "甲", "B": "乙", "C": "丙", "D": "丁"},
+            },
+            {"answer": "D", "answer_index": 3, "similarity": 0.7},
+        )
+        pipeline = CapturePipeline(store, engine.resolve_both, os.path.join(folder, "a.md"))
+        pipeline.ingest(
+            {
+                "request": {"method": "GET", "url": "u", "path": "/qa/api/quiz/X",
+                            "host": "quiz-activity.eastmoney.com"},
+                "response": {"status_code": 200, "body": {"data": {"nextQuestion": {
+                    "questionId": 5, "questionTitle": "多选题",
+                    "answers": ["甲", "乙", "丙", "丁"], "type": "M"}}}},
+            }
+        )
+        back = store.get_question("5")
+        assert back["bank_matched_question"] == "题库里的原题", back.get("bank_matched_question")
+        assert back["bank_matched_number"] == "11"
+        assert back["bank_matched_options"] == {"A": "甲", "B": "乙", "C": "丙", "D": "丁"}
+        assert back["bank_answer"] == "ABD"
+        assert back["llm_answer"] == "D"
+        print(f"   匹配题={back['bank_matched_question']} 题号={back['bank_matched_number']}")
+        print(f"   匹配选项={back['bank_matched_options']}")
+        print(f"   题库答案={back['bank_answer']} 大模型={back['llm_answer']}")
+
     print("multi-source test passed")
 
 

@@ -70,10 +70,13 @@
     .answer-block { background: #16213a; border: 1px solid #24304d; border-radius: 10px; padding: 14px 16px; }
     .answer-block.bank { border-left: 4px solid #3b82f6; }
     .answer-block.llm { border-left: 4px solid #a855f7; }
-    .answer-head { font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+    .answer-head { font-size: 12px; color: #94a3b8; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .answer-badge { font-size: 10.5px; padding: 1px 8px; border-radius: 999px; background: #24304d; color: #94a3b8; font-weight: 600; }
+    .answer-badge.warn { background: #78350f; color: #fde68a; }
     .answer-main { font-size: 30px; font-weight: 800; letter-spacing: 1px; }
     .answer-block.bank .answer-main { color: #93c5fd; }
     .answer-block.llm .answer-main { color: #d8b4fe; }
+    .answer-picked { font-size: 13px; color: #e2e8f0; margin-top: 4px; word-break: break-word; }
     .answer-basis { font-size: 11.5px; color: #64748b; margin-top: 6px; }
     .answer-note { font-size: 12px; color: #cbd5e1; margin-top: 8px; line-height: 1.5; }
     .agree { margin-top: 12px; border-radius: 10px; padding: 11px 15px; font-size: 13.5px; font-weight: 600; background: #16213a; border: 1px solid #24304d; }
@@ -81,6 +84,18 @@
     .agree.diff { border-color: #b45309; background: #2a1f0f; color: #fde68a; }
     .agree.wait { color: #64748b; }
     .hint { margin-top: 8px; font-size: 11.5px; color: #475569; }
+
+    /* 题目与选项 */
+    .q-panel { background: #16213a; border: 1px solid #24304d; border-radius: 10px; padding: 15px 17px; }
+    .q-title { font-size: 15px; line-height: 1.65; color: #e2e8f0; font-weight: 600; }
+    .q-opts { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+    .q-opt { font-size: 13px; color: #cbd5e1; padding: 6px 10px; border-radius: 7px; background: #1c2942; border: 1px solid transparent; }
+    .q-opt.hit { border-color: #3b82f6; background: #16233d; }
+    .q-opt.hit::after { content: " ← 选中答案"; color: #93c5fd; font-size: 11px; font-weight: 700; }
+    .q-opt .lbl { color: #64748b; font-weight: 700; margin-right: 6px; }
+    .match-panel { margin-top: 14px; background: #141d33; border: 1px solid #24304d; border-left: 4px solid #0ea5e9; border-radius: 10px; padding: 14px 16px; }
+    .match-head { font-size: 11.5px; color: #7dd3fc; font-weight: 700; margin-bottom: 7px; }
+    .match-title { font-size: 13.5px; color: #e2e8f0; line-height: 1.6; }
   </style>
 </head>
 <body>
@@ -156,22 +171,43 @@
   <div class="bar"><div id="bar"></div></div>
   <div id="message">等待事件…</div>
 
-  <h2>当前题目的两个来源答案</h2>
+  <h2>当前题目</h2>
+  <div class="q-panel">
+    <div class="q-title" id="q-title">等待题目…</div>
+    <div class="q-opts" id="q-opts"></div>
+  </div>
+
+  <h2>两个来源的答案</h2>
   <div class="answers" id="answers">
     <div class="answer-block bank">
-      <div class="answer-head">题库侧</div>
+      <div class="answer-head">
+        <span>题库侧</span>
+        <span class="answer-badge" id="bank-badge"></span>
+      </div>
       <div class="answer-main" id="bank-answer">-</div>
+      <div class="answer-picked" id="bank-picked"></div>
       <div class="answer-basis" id="bank-basis"></div>
       <div class="answer-note" id="bank-note"></div>
     </div>
     <div class="answer-block llm">
-      <div class="answer-head">大模型侧</div>
+      <div class="answer-head">
+        <span>大模型侧</span>
+        <span class="answer-badge" id="llm-badge"></span>
+      </div>
       <div class="answer-main" id="llm-answer">-</div>
+      <div class="answer-picked" id="llm-picked"></div>
       <div class="answer-basis" id="llm-basis"></div>
       <div class="answer-note" id="llm-note"></div>
     </div>
   </div>
   <div class="agree" id="agree">等待题目…</div>
+
+  <div class="match-panel" id="match-panel" style="display:none">
+    <div class="match-head">题库匹配到的原题</div>
+    <div class="match-title" id="match-title"></div>
+    <div class="q-opts" id="match-opts"></div>
+  </div>
+
   <div class="hint">答案仅供参考，提交由你手动完成。</div>
 
   <h2>实时事件</h2>
@@ -273,8 +309,8 @@
       ? (rd.warnings.length ? "可以答题，但有降级项" : "一切就绪，可以答题")
       : "不能答题，存在阻塞项";
     meta($("ready-meta"), [
-      ["提交序号", rd.submit_index_hint],
-      ["自动提交", rd.auto_submit ? "开" : "关"],
+      ["答案来源", "题库 + 大模型"],
+      ["提交方式", "手动"],
     ]);
 
     const banner = $("ready-banner");
@@ -355,7 +391,7 @@
     els.events.textContent = `${line}\n` + els.events.textContent;
   }
 
-  // ---- 双来源答案 ----
+  // ---- 题目与双来源答案 ----
   function letterOf(idx, raw) {
     if (idx !== null && idx !== undefined && !isNaN(Number(idx))) {
       const n = Number(idx);
@@ -365,27 +401,101 @@
     return t.length === 1 && t >= "A" && t <= "Z" ? t : "";
   }
 
-  function renderAnswers(a) {
-    if (!a) return;
+  function indexOfLetter(letter) {
+    if (!letter) return -1;
+    return letter.charCodeAt(0) - 65;
+  }
+
+  /** 把答案字母串拆成数组，兼容单选与多选 */
+  function lettersOf(idx, raw) {
+    const t = String(raw || "").trim().toUpperCase();
+    if (t && /^[A-Z]+$/.test(t)) return t.split("");
+    const one = letterOf(idx, raw);
+    return one ? [one] : [];
+  }
+
+  /** 渲染一组选项，按选中字母集合高亮 */
+  function renderOptions(container, options, hitLetters) {
+    container.innerHTML = "";
+    const hits = new Set(hitLetters || []);
+    (options || []).forEach((opt, i) => {
+      const div = document.createElement("div");
+      const label = opt.label || String.fromCharCode(65 + i);
+      div.className = "q-opt" + (hits.has(label.toUpperCase()) ? " hit" : "");
+      const lbl = document.createElement("span");
+      lbl.className = "lbl";
+      lbl.textContent = label + ".";
+      div.appendChild(lbl);
+      div.appendChild(document.createTextNode(opt.text || ""));
+      container.appendChild(div);
+    });
+  }
+
+  /** 按答案字母集合取出对应选项文本，多选用「、」连接 */
+  function pickTexts(options, letters) {
+    const out = [];
+    (letters || []).forEach(ch => {
+      const idx = ch.charCodeAt(0) - 65;
+      if (options && options[idx]) out.push(`${ch}. ${options[idx].text}`);
+    });
+    return out.join("　");
+  }
+
+  function renderAnswers(item) {
+    if (!item) return;
+    const a = item.answers || {};
     const bank = a.bank || {};
     const llm = a.llm || {};
 
-    const bankLetter = letterOf(bank.answer_index, bank.answer);
-    const llmLetter = letterOf(llm.answer_index, llm.answer);
+    // 题干
+    $("q-title").textContent = item.question_title || "（题干缺失）";
 
+    const bankLetters = lettersOf(bank.answer_index, bank.answer);
+    const llmLetters = lettersOf(llm.answer_index, llm.answer);
+    const bankLetter = bankLetters.join("");
+    const llmLetter = llmLetters.join("");
+
+    // 当前题目的选项（不高亮，选中项在各自卡片里说明）
+    renderOptions($("q-opts"), item.options, []);
+
+    // 题库侧
     $("bank-answer").textContent = bankLetter || "未命中";
-    $("llm-answer").textContent = llmLetter || "未返回";
-
+    $("bank-picked").textContent = bankLetter
+      ? `选中：${bank.answer_text || pickTexts(item.options, bankLetters) || "（未找到对应选项）"}`
+      : "";
     let bankBasis = bank.source || "—";
     if (bank.similarity != null) bankBasis += ` ｜ 相似度 ${Number(bank.similarity).toFixed(4)}`;
     $("bank-basis").textContent = bankBasis;
     $("bank-note").textContent = bank.explanation || "";
+    const belowThreshold = bank.source === "local_semantic_low";
+    const badge = $("bank-badge");
+    badge.textContent = belowThreshold ? "低于阈值" : (bank.source || "");
+    badge.className = "answer-badge" + (belowThreshold ? " warn" : "");
 
+    // 大模型侧
+    $("llm-answer").textContent = llmLetter || "未返回";
+    $("llm-picked").textContent = llmLetter
+      ? `选中：${llm.answer_text || pickTexts(item.options, llmLetters) || "（未返回选项内容）"}`
+      : "";
     let llmBasis = "DeepSeek";
     if (llm.confidence != null) llmBasis += ` ｜ 置信度 ${Number(llm.confidence).toFixed(4)}`;
     $("llm-basis").textContent = llmBasis;
     $("llm-note").textContent = llm.explanation || "";
+    $("llm-badge").textContent = llmLetter ? "llm_api" : "";
+    $("llm-badge").className = "answer-badge";
 
+    // 题库匹配到的原题（多选也高亮全部命中项）
+    const panel = $("match-panel");
+    if (bank.matched_question) {
+      panel.style.display = "";
+      const num = bank.matched_number ? `（题库第 ${bank.matched_number} 题）` : "";
+      $("match-title").textContent = bank.matched_question + num;
+      renderOptions($("match-opts"), bank.matched_options, bankLetters);
+    } else {
+      panel.style.display = "none";
+    }
+
+    // 一致性结论（按字母集合比较，支持多选）
     const agree = $("agree");
     if (bankLetter && llmLetter) {
       const same = bankLetter === llmLetter;
@@ -407,7 +517,7 @@
   function loadLatestAnswer() {
     fetch("/automation/latest")
       .then(r => r.json())
-      .then(d => { if (d.success && d.item) renderAnswers(d.item.answers); })
+      .then(d => { if (d.success && d.item) renderAnswers(d.item); })
       .catch(() => {});
   }
 

@@ -411,7 +411,8 @@ def check_readiness(bank: Dict[str, Any], files: Dict[str, Any], capture: Dict[s
         "warnings": warnings,
         "submit_index_base": submit_base,
         "submit_index_hint": "1 基（服务器内部序号从 1 开始）" if submit_base == 1 else "0 基",
-        "auto_submit": config.get_int("AUTO_SUBMIT", 1) == 1,
+        # 答案只呈现不提交，此项固定为 False，保留字段是为了兼容旧前端
+        "auto_submit": False,
     }
 
 

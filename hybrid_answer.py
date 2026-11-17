@@ -167,6 +167,10 @@ class HybridAnswerEngine:
                 )
                 local["below_threshold"] = similarity < self.local_threshold
                 local["route"] = "bank"
+                # 统一命名，让上层能直接展示匹配到的那道题
+                local.setdefault("matched_question", local.get("question"))
+                local.setdefault("matched_options", local.get("options"))
+                local.setdefault("matched_number", local.get("number"))
                 return local
         return None
 
@@ -186,6 +190,7 @@ class HybridAnswerEngine:
             "answer_source": source,
             "matched_number": item.get("number"),
             "matched_question": item.get("question"),
+            "matched_options": item.get("options"),
         }
 
     def _resolve_with_llm(

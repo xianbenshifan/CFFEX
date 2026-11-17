@@ -9,7 +9,7 @@ import sys
 import logging
 import re
 import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from flask import Flask, request, jsonify, Response, send_file
 import requests
 from flask_cors import CORS
@@ -856,32 +856,75 @@ def _handle_mcp_envelope(envelope):
     return get_automation_runner().handle_capture(envelope)
 
 
+def _options_list(raw: Any) -> List[Dict[str, str]]:
+    """把任意选项结构统一成 [{label, text}]，方便前端渲染。"""
+    items: List[Dict[str, str]] = []
+    if isinstance(raw, dict):
+        for key in sorted(raw.keys()):
+            items.append({"label": str(key), "text": str(raw[key])})
+    elif isinstance(raw, list):
+        for index, item in enumerate(raw):
+            if isinstance(item, dict):
+                label = str(item.get("label") or chr(65 + index))
+                text = item.get("content", item.get("text", ""))
+            else:
+                label, text = chr(65 + index), item
+            items.append({"label": label, "text": str(text)})
+    return items
+
+
 @app.route('/automation/latest', methods=['GET'])
 def automation_latest():
-    """返回最近一道题的题库侧与大模型侧答案，供面板展示。"""
+    """返回最近一道题的完整呈现数据：题干、选项、两个来源的答案及其选项内容。"""
     items = _capture_store.list_questions(limit=1)
     if not items:
         return jsonify({"success": False, "error": "尚无题目"}), 404
+
     item = items[0]
+    options = _options_list(item.get("options"))
+    bank_options = _options_list(item.get("bank_matched_options"))
+
+    bank_index = item.get("bank_answer_index")
+    llm_index = item.get("llm_answer_index")
+
+    def pick_text(opts, idx, fallback_letter):
+        """按索引取选项文本，取不到就返回空串。"""
+        if idx is not None:
+            try:
+                i = int(idx)
+                if 0 <= i < len(opts):
+                    return opts[i]["text"]
+            except (TypeError, ValueError):
+                pass
+        return ""
+
     return jsonify(
         {
             "success": True,
             "item": {
                 "question_id": item.get("question_id"),
+                "quiz_id": item.get("quiz_id"),
                 "question_title": item.get("question_title"),
+                "options": options,
                 "answers": {
                     "bank": {
                         "answer": item.get("bank_answer"),
-                        "answer_index": item.get("bank_answer_index"),
+                        "answer_index": bank_index,
                         "source": item.get("bank_source"),
                         "similarity": item.get("bank_similarity"),
                         "explanation": item.get("bank_explanation"),
+                        "matched_question": item.get("bank_matched_question"),
+                        "matched_number": item.get("bank_matched_number"),
+                        "matched_options": bank_options,
+                        "answer_text": pick_text(options, bank_index, None)
+                        or pick_text(bank_options, bank_index, None),
                     },
                     "llm": {
                         "answer": item.get("llm_answer"),
-                        "answer_index": item.get("llm_answer_index"),
+                        "answer_index": llm_index,
                         "confidence": item.get("llm_confidence"),
                         "explanation": item.get("llm_explanation"),
+                        "answer_text": pick_text(options, llm_index, None),
                     },
                 },
             },
