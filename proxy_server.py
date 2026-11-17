@@ -297,13 +297,26 @@ def build_status_context() -> _StatusContext:
     return _StatusContext()
 
 
+_hybrid_engine = None
+
+
+def get_hybrid_engine():
+    """懒加载双来源答案引擎，供非自动化路径复用。"""
+    global _hybrid_engine
+    if _hybrid_engine is None:
+        from hybrid_answer import HybridAnswerEngine
+
+        _hybrid_engine = HybridAnswerEngine(local_resolver=search_answer)
+    return _hybrid_engine
+
+
 def get_capture_pipeline() -> CapturePipeline:
     """懒加载抓包管线，避免模块导入阶段触发模型初始化。"""
     global _capture_pipeline
     if _capture_pipeline is None:
         _capture_pipeline = CapturePipeline(
             store=_capture_store,
-            answer_resolver=search_answer,
+            answer_resolver=get_hybrid_engine().resolve_both,
         )
     return _capture_pipeline
 
@@ -768,11 +781,8 @@ def receive_charles_mcp_capture():
         payload = request.get_json(silent=True) or {}
         if not isinstance(payload, dict):
             return jsonify({"success": False, "error": "请求体必须是 JSON 对象"}), 400
-        # 默认开启完整编排；提交通道一律直连目标 API。
-        if config.get_int("AUTO_SUBMIT", 1) == 1:
-            result = get_automation_runner().handle_capture(payload)
-        else:
-            result = ingest_capture(payload, source="charles_mcp")
+        # 统一走双来源解析：只给答案，不提交。
+        result = get_automation_runner().handle_capture(payload)
         return jsonify({"success": True, **result})
     except Exception as exc:
         logger.error("[Charles MCP] 抓包处理失败: %s", exc, exc_info=True)
@@ -842,10 +852,41 @@ def mcp_capture_set_interval():
 
 
 def _handle_mcp_envelope(envelope):
-    """把 MCP 收到的信封交给自动答题编排。"""
-    if config.get_int("AUTO_SUBMIT", 1) == 1:
-        return get_automation_runner().handle_capture(envelope)
-    return ingest_capture(envelope, source="charles_mcp_poll")
+    """把 MCP 收到的信封交给双来源解析编排（不提交答案）。"""
+    return get_automation_runner().handle_capture(envelope)
+
+
+@app.route('/automation/latest', methods=['GET'])
+def automation_latest():
+    """返回最近一道题的题库侧与大模型侧答案，供面板展示。"""
+    items = _capture_store.list_questions(limit=1)
+    if not items:
+        return jsonify({"success": False, "error": "尚无题目"}), 404
+    item = items[0]
+    return jsonify(
+        {
+            "success": True,
+            "item": {
+                "question_id": item.get("question_id"),
+                "question_title": item.get("question_title"),
+                "answers": {
+                    "bank": {
+                        "answer": item.get("bank_answer"),
+                        "answer_index": item.get("bank_answer_index"),
+                        "source": item.get("bank_source"),
+                        "similarity": item.get("bank_similarity"),
+                        "explanation": item.get("bank_explanation"),
+                    },
+                    "llm": {
+                        "answer": item.get("llm_answer"),
+                        "answer_index": item.get("llm_answer_index"),
+                        "confidence": item.get("llm_confidence"),
+                        "explanation": item.get("llm_explanation"),
+                    },
+                },
+            },
+        }
+    )
 
 
 @app.route('/captures', methods=['GET'])

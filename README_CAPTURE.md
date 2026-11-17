@@ -109,12 +109,24 @@ SUBMIT_INDEX_BASE=1
 大模型只接 DeepSeek 官方一个平台（`LLM_API_BASE` 默认
 `https://api.deepseek.com/v1`）。
 
-## 抓包与提交的分工
+## 抓包与答案分工
 
 - **收题**：`charles_mcp_http.py` 把 Charles MCP 以 streamable-http 暴露在
   `http://127.0.0.1:8931/mcp`，服务通过 `CHARLES_MCP_URL` 连接。这条路不需要 Agent。
-- **提交**：一律直连目标 API。`charles-mcp` 没有能凭空发出新请求的工具
-  （`reverse_replay_entry` 只能重放已有抓包条目），因此不存在 MCP 提交通道。
+- **给答案**：每题同时给出**题库侧**与**大模型侧**两份结论，并列呈现、互相校验。
+  题库侧走精确匹配与语义检索，大模型侧走 DeepSeek。
+- **不自动提交**：任何答案都不会自动发出，由人对照两份结论自己点选。
+
+两份答案的来源标记：
+
+| 标记 | 含义 |
+|---|---|
+| `local_exact` | 题库精确命中（相似度 1.0） |
+| `local_semantic` | 语义检索达到阈值（默认 0.82） |
+| `local_semantic_low` | 语义检索低于阈值，可信度偏低但仍呈现 |
+| `llm_api` | 大模型结论 |
+
+面板 `http://<本机IP>:8889/dashboard` 与答题记录 `answers.md` 都会展示两份答案及一致性判断。
 
 ## 收题靠轮询
 

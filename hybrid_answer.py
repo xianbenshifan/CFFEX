@@ -78,7 +78,11 @@ class HybridAnswerEngine:
         question_text: str,
         options: Any = None,
     ) -> Optional[Dict[str, Any]]:
-        """执行本地精确、本地语义、大模型兜底。"""
+        """按优先级返回单个答案：题库精确 -> 本地语义 -> 大模型。
+
+        保留此方法供只需一个答案的场景使用；需要同时看题库与大模型两份结论时用
+        `resolve_both`。
+        """
         exact = self._exact_index.get(normalize_text(question_text))
         if exact is None:
             # 抓包管线会把选项拼接到题干后面，再尝试只匹配题干。
@@ -103,6 +107,68 @@ class HybridAnswerEngine:
         if remote:
             remote["route"] = "llm_fallback"
         return remote
+
+    def resolve_both(
+        self,
+        question_text: str,
+        options: Any = None,
+    ) -> Dict[str, Any]:
+        """同时给出题库侧与大模型侧两份答案，供人工选择。
+
+        与 `resolve` 的区别是不做优先级短路：即使题库命中，也照样询问大模型，
+        让两种判断并列呈现、互相校验。
+        """
+        bank = self._resolve_bank(question_text, options)
+        llm = self._resolve_with_llm(question_text, options)
+        if llm:
+            llm["route"] = "llm"
+
+        agree = None
+        if bank and llm:
+            bank_answer = str(bank.get("answer") or "").strip().upper()
+            llm_answer = str(llm.get("answer") or "").strip().upper()
+            agree = bool(bank_answer) and bank_answer == llm_answer
+
+        return {
+            "question_text": question_text,
+            "options": options,
+            "bank": bank,
+            "llm": llm,
+            "agree": agree,
+        }
+
+    def _resolve_bank(
+        self,
+        question_text: str,
+        options: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        """只走题库侧：精确匹配优先，其次本地语义检索。"""
+        exact = self._exact_index.get(normalize_text(question_text))
+        if exact is None:
+            title_only = re.split(r"\s+A\.\s*", question_text, maxsplit=1)[0]
+            exact = self._exact_index.get(normalize_text(title_only))
+        if exact:
+            return self._format_local(exact, 1.0, options, "local_exact")
+
+        if self.local_resolver:
+            try:
+                local = self.local_resolver(question_text)
+            except Exception:
+                logger.exception("本地语义检索失败")
+                return None
+            if local and local.get("answer"):
+                similarity = float(local.get("similarity") or 0)
+                # 这里不做阈值过滤：低于阈值的结果也呈现，由人判断可信度。
+                if local.get("answer_index") is None:
+                    local["answer_index"] = answer_index(local.get("answer"), options)
+                local["answer_source"] = (
+                    "local_semantic" if similarity >= self.local_threshold
+                    else "local_semantic_low"
+                )
+                local["below_threshold"] = similarity < self.local_threshold
+                local["route"] = "bank"
+                return local
+        return None
 
     def _format_local(
         self,

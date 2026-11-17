@@ -134,6 +134,75 @@ def _submitted_letter(value: Any) -> Optional[str]:
     return None
 
 
+def _render_two_sources(question: Dict[str, Any]) -> List[str]:
+    """并排渲染题库侧与大模型侧两份答案，供人工选择。"""
+    bank_letter = index_to_letter(question.get("bank_answer_index")) or index_to_letter(
+        question.get("bank_answer")
+    )
+    llm_letter = index_to_letter(question.get("llm_answer_index")) or index_to_letter(
+        question.get("llm_answer")
+    )
+    bank_source = question.get("bank_source")
+    bank_sim = question.get("bank_similarity")
+    llm_conf = question.get("llm_confidence")
+
+    # 旧数据没有双来源字段时，退回单条推断结果
+    if bank_letter is None and llm_letter is None:
+        fallback = index_to_letter(question.get("answer_index")) or index_to_letter(
+            question.get("answer")
+        )
+        source = question.get("answer_source") or "未记录来源"
+        if fallback:
+            return [f"**{fallback}**（来源：{source}）"]
+        return [f"未能给出答案（来源：{source}）"]
+
+    lines = ["| 来源 | 答案 | 依据 |", "|---|---|---|"]
+
+    if bank_letter:
+        basis = bank_source or "题库"
+        if bank_sim is not None:
+            try:
+                basis += f"，相似度 {float(bank_sim):.4f}"
+            except (TypeError, ValueError):
+                basis += f"，相似度 {bank_sim}"
+        lines.append(f"| 题库 | **{bank_letter}** | {basis} |")
+    else:
+        lines.append("| 题库 | 未命中 | — |")
+
+    if llm_letter:
+        basis = "大模型"
+        if llm_conf is not None:
+            try:
+                basis += f"，置信度 {float(llm_conf):.4f}"
+            except (TypeError, ValueError):
+                basis += f"，置信度 {llm_conf}"
+        lines.append(f"| 大模型 | **{llm_letter}** | {basis} |")
+    else:
+        lines.append("| 大模型 | 未返回 | — |")
+
+    if bank_letter and llm_letter:
+        if bank_letter == llm_letter:
+            lines.extend(["", f"结论：两个来源一致，均为 **{bank_letter}**。"])
+        else:
+            lines.extend(
+                ["", f"结论：两个来源**不一致**（题库 {bank_letter} / 大模型 {llm_letter}），请人工判断。"]
+            )
+    elif bank_letter:
+        lines.extend(["", f"结论：只有题库给出答案 **{bank_letter}**（大模型未返回）。"])
+    elif llm_letter:
+        lines.extend(["", f"结论：只有大模型给出答案 **{llm_letter}**（题库未命中）。"])
+    else:
+        lines.extend(["", "结论：两个来源都没有给出答案。"])
+
+    bank_explanation = question.get("bank_explanation")
+    if bank_explanation:
+        lines.extend(["", f"题库理由：{bank_explanation}"])
+    llm_explanation = question.get("llm_explanation")
+    if llm_explanation:
+        lines.extend(["", f"大模型理由：{llm_explanation}"])
+    return lines
+
+
 def _verdict_text(verdict: Any) -> str:
     """把服务器判定结果写成可读结论。"""
     if verdict is None:
@@ -172,28 +241,9 @@ def render_question(question: Dict[str, Any], submissions: List[Dict[str, Any]])
         lines.extend(options)
         lines.append("")
 
-    inferred = index_to_letter(question.get("answer_index")) or index_to_letter(
-        question.get("answer")
-    )
-    source = question.get("answer_source") or "未记录来源"
-    similarity = question.get("similarity")
-
     lines.append("### 我们的推断")
     lines.append("")
-    if inferred:
-        detail = f"**{inferred}**（来源：{source}"
-        if similarity is not None:
-            try:
-                detail += f"，相似度 {float(similarity):.4f}"
-            except (TypeError, ValueError):
-                detail += f"，相似度 {similarity}"
-        detail += "）"
-        lines.append(detail)
-    else:
-        lines.append(f"未能给出答案（来源：{source}）")
-    explanation = question.get("answer_explanation")
-    if explanation:
-        lines.extend(["", f"理由：{explanation}"])
+    lines.extend(_render_two_sources(question))
     lines.append("")
 
     lines.append("### 服务器标准答案")
@@ -233,8 +283,8 @@ def render_document(
         "",
         f"> 共 {len(questions)} 道题 ｜ 生成时间 {generated}",
         "",
-        "每题包含两条答案线：**我们的推断**（题库 / 语义检索 / 大模型的结论与理由）",
-        "与**服务器标准答案**（提交后由服务器返回）。",
+        "每题同时给出**题库**与**大模型**两个来源的答案供人工选择（不会自动提交），",
+        "以及服务器返回的标准答案。",
         "",
         "---",
         "",

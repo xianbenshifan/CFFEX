@@ -140,6 +140,16 @@ class QuizCaptureStore:
                     "answer_explanation": "TEXT",
                     "server_correct": "INTEGER",
                     "server_answer_index": "TEXT",
+                    # 双来源答案：题库侧与大模型侧分别保存，供人工对照选择
+                    "bank_answer": "TEXT",
+                    "bank_answer_index": "INTEGER",
+                    "bank_source": "TEXT",
+                    "bank_similarity": "REAL",
+                    "bank_explanation": "TEXT",
+                    "llm_answer": "TEXT",
+                    "llm_answer_index": "INTEGER",
+                    "llm_explanation": "TEXT",
+                    "llm_confidence": "REAL",
                 }.items():
                     if column not in existing_columns:
                         conn.execute(
@@ -211,14 +221,21 @@ class QuizCaptureStore:
                 conn.execute(
                     """
                     INSERT INTO questions (
-                    question_id, quiz_id, question_type, question_title,
-                    options_json, question_text, server_analysis,
-                    answer_explanation,
-                    server_correct, server_answer_index, server_correct_index,
-                    server_right_index, inferred_answer,
-                    inferred_answer_index, similarity, answer_source,
-                    first_seen, last_seen, capture_id, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        question_id, quiz_id, question_type, question_title,
+                        options_json, question_text, server_analysis,
+                        answer_explanation,
+                        server_correct, server_answer_index, server_correct_index,
+                        server_right_index, inferred_answer,
+                        inferred_answer_index, similarity, answer_source,
+                        bank_answer, bank_answer_index, bank_source,
+                        bank_similarity, bank_explanation,
+                        llm_answer, llm_answer_index, llm_explanation, llm_confidence,
+                        first_seen, last_seen, capture_id, raw_json
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?
+                    )
                     ON CONFLICT(question_id) DO UPDATE SET
                         quiz_id = COALESCE(excluded.quiz_id, questions.quiz_id),
                         question_type = COALESCE(excluded.question_type, questions.question_type),
@@ -228,15 +245,15 @@ class QuizCaptureStore:
                             ELSE excluded.options_json
                         END,
                         question_text = COALESCE(NULLIF(excluded.question_text, ''), questions.question_text),
-                    server_analysis = COALESCE(excluded.server_analysis, questions.server_analysis),
-                    answer_explanation = COALESCE(
-                        excluded.answer_explanation, questions.answer_explanation
-                    ),
-                    server_correct = COALESCE(excluded.server_correct, questions.server_correct),
-                    server_answer_index = COALESCE(
-                        excluded.server_answer_index, questions.server_answer_index
-                    ),
-                    server_correct_index = COALESCE(
+                        server_analysis = COALESCE(excluded.server_analysis, questions.server_analysis),
+                        answer_explanation = COALESCE(
+                            excluded.answer_explanation, questions.answer_explanation
+                        ),
+                        server_correct = COALESCE(excluded.server_correct, questions.server_correct),
+                        server_answer_index = COALESCE(
+                            excluded.server_answer_index, questions.server_answer_index
+                        ),
+                        server_correct_index = COALESCE(
                             excluded.server_correct_index, questions.server_correct_index
                         ),
                         server_right_index = COALESCE(
@@ -248,6 +265,27 @@ class QuizCaptureStore:
                         ),
                         similarity = COALESCE(excluded.similarity, questions.similarity),
                         answer_source = COALESCE(excluded.answer_source, questions.answer_source),
+                        bank_answer = COALESCE(excluded.bank_answer, questions.bank_answer),
+                        bank_answer_index = COALESCE(
+                            excluded.bank_answer_index, questions.bank_answer_index
+                        ),
+                        bank_source = COALESCE(excluded.bank_source, questions.bank_source),
+                        bank_similarity = COALESCE(
+                            excluded.bank_similarity, questions.bank_similarity
+                        ),
+                        bank_explanation = COALESCE(
+                            excluded.bank_explanation, questions.bank_explanation
+                        ),
+                        llm_answer = COALESCE(excluded.llm_answer, questions.llm_answer),
+                        llm_answer_index = COALESCE(
+                            excluded.llm_answer_index, questions.llm_answer_index
+                        ),
+                        llm_explanation = COALESCE(
+                            excluded.llm_explanation, questions.llm_explanation
+                        ),
+                        llm_confidence = COALESCE(
+                            excluded.llm_confidence, questions.llm_confidence
+                        ),
                         last_seen = excluded.last_seen,
                         capture_id = COALESCE(excluded.capture_id, questions.capture_id),
                         raw_json = excluded.raw_json
@@ -258,17 +296,26 @@ class QuizCaptureStore:
                         question.get("type"),
                         question_title,
                         json_text(options),
-                    question_text,
-                    question.get("server_analysis"),
-                    question.get("answer_explanation"),
-                    question.get("server_correct"),
-                    question.get("server_answer_index"),
-                    question.get("server_correct_index"),
+                        question_text,
+                        question.get("server_analysis"),
+                        question.get("answer_explanation"),
+                        question.get("server_correct"),
+                        question.get("server_answer_index"),
+                        question.get("server_correct_index"),
                         question.get("server_right_index"),
                         question.get("inferred_answer"),
                         question.get("inferred_answer_index"),
                         question.get("similarity"),
                         question.get("answer_source"),
+                        question.get("bank_answer"),
+                        question.get("bank_answer_index"),
+                        question.get("bank_source"),
+                        question.get("bank_similarity"),
+                        question.get("bank_explanation"),
+                        question.get("llm_answer"),
+                        question.get("llm_answer_index"),
+                        question.get("llm_explanation"),
+                        question.get("llm_confidence"),
                         now,
                         now,
                         capture_id,
@@ -455,6 +502,15 @@ class QuizCaptureStore:
             "answer_index": row["inferred_answer_index"],
             "similarity": row["similarity"],
             "answer_source": row["answer_source"],
+            "bank_answer": row["bank_answer"],
+            "bank_answer_index": row["bank_answer_index"],
+            "bank_source": row["bank_source"],
+            "bank_similarity": row["bank_similarity"],
+            "bank_explanation": row["bank_explanation"],
+            "llm_answer": row["llm_answer"],
+            "llm_answer_index": row["llm_answer_index"],
+            "llm_explanation": row["llm_explanation"],
+            "llm_confidence": row["llm_confidence"],
             "first_seen": row["first_seen"],
             "last_seen": row["last_seen"],
             "capture_id": row["capture_id"],

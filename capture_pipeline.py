@@ -168,13 +168,54 @@ class CapturePipeline:
         answer_index = None
         answer_source = None
         answer_explanation = None
+        bank_answer = None
+        bank_index = None
+        bank_source = None
+        bank_similarity = None
+        bank_explanation = None
+        llm_answer = None
+        llm_index = None
+        llm_explanation = None
+        llm_confidence = None
+
         if self.answer_resolver and question_text:
             try:
                 match = self.answer_resolver(question_text)
             except Exception:
                 logger.exception("题目答案解析失败: question_id=%s", question_id)
                 match = None
-            if match:
+
+            if isinstance(match, dict) and "bank" in match:
+                # 双来源结果：题库与大模型并列
+                bank = match.get("bank") or {}
+                llm = match.get("llm") or {}
+                if bank:
+                    bank_answer = bank.get("answer")
+                    bank_index = bank.get("answer_index")
+                    if bank_index is None:
+                        bank_index = _answer_index(bank_answer, options)
+                    bank_source = bank.get("answer_source", "local_database")
+                    bank_similarity = bank.get("similarity")
+                    bank_explanation = bank.get("explanation")
+                if llm:
+                    llm_answer = llm.get("answer")
+                    llm_index = llm.get("answer_index")
+                    if llm_index is None:
+                        llm_index = _answer_index(llm_answer, options)
+                    llm_explanation = llm.get("explanation")
+                    llm_confidence = llm.get("similarity")
+                # 兼容旧字段：优先填题库侧，没有题库结果才用大模型侧
+                if bank_answer:
+                    answer, answer_index = bank_answer, bank_index
+                    answer_source = bank_source
+                    similarity = bank_similarity
+                    answer_explanation = bank_explanation
+                elif llm_answer:
+                    answer, answer_index = llm_answer, llm_index
+                    answer_source = "llm_api"
+                    similarity = llm_confidence
+                    answer_explanation = llm_explanation
+            elif match:
                 answer = match.get("answer")
                 similarity = match.get("similarity")
                 answer_index = match.get("answer_index")
@@ -182,6 +223,9 @@ class CapturePipeline:
                     answer_index = _answer_index(answer, options)
                 answer_source = match.get("answer_source", "local_database")
                 answer_explanation = match.get("explanation")
+                bank_answer, bank_index = answer, answer_index
+                bank_source, bank_similarity = answer_source, similarity
+                bank_explanation = answer_explanation
 
         # 服务返回的 index 可能是用户上次选择的索引，单独保存，避免误当作正确答案。
         result = {
@@ -199,6 +243,15 @@ class CapturePipeline:
             "inferred_answer_index": answer_index,
             "similarity": similarity,
             "answer_source": answer_source,
+            "bank_answer": bank_answer,
+            "bank_answer_index": bank_index,
+            "bank_source": bank_source,
+            "bank_similarity": bank_similarity,
+            "bank_explanation": bank_explanation,
+            "llm_answer": llm_answer,
+            "llm_answer_index": llm_index,
+            "llm_explanation": llm_explanation,
+            "llm_confidence": llm_confidence,
             "raw": next_question,
         }
         self.store.upsert_question(result, capture_id=capture_id)

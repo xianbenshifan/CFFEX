@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -117,134 +117,85 @@ class QuizAutomation:
         local_resolver=None,
         progress: Optional[ProgressTracker] = None,
     ) -> None:
-        # 答案路由：精确题库 -> 本地语义检索 -> LLM API。
+        # 双来源：题库侧（精确 + 语义）与大模型侧并列给出，不自动提交。
         self.engine = HybridAnswerEngine(local_resolver=local_resolver)
-        self.pipeline = CapturePipeline(store=store, answer_resolver=self.engine.resolve)
+        self.pipeline = CapturePipeline(
+            store=store, answer_resolver=self.engine.resolve_both
+        )
         self.submitter = AnswerSubmitter()
         self.store = store
         self.progress = progress or get_progress_tracker()
 
     def handle_capture(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
-        """循环处理当前题目和服务器返回的 nextQuestion。"""
+        """解析抓包并给出双来源答案，不做任何提交。
+
+        是否提交答案由人决定；本方法只把题目归档、把题库侧与大模型侧的结论
+        并列呈现。
+        """
         self.progress.start_run()
-        self.progress.update("capture", "已收到 Charles MCP 抓包")
+        self.progress.update("capture", "已收到抓包，正在解析题目")
         current = self.pipeline.ingest(envelope, source="charles_mcp_automation")
         first_result = current
-        steps = []
-        max_steps = max(1, config.get_int("MAX_AUTO_QUESTIONS", 100))
 
-        for _ in range(max_steps):
-            question = current.get("question")
-            if not question:
-                self.progress.update("idle", "抓包中没有可处理题目", status="idle")
-                break
-
+        question = current.get("question")
+        steps: List[Dict[str, Any]] = []
+        if not question:
+            self.progress.update("idle", "抓包中没有可处理题目", status="idle")
+        else:
+            question_id = question.get("question_id")
             self.progress.update(
                 "question_parsed",
-                f"已提取题目 {question.get('question_id')}",
-                current=len(steps) + 1,
-                question_id=question.get("question_id"),
+                f"已提取题目 {question_id}",
+                current=1,
+                question_id=question_id,
             )
-            answer = {
-                "answer": question.get("inferred_answer"),
-                "answer_index": question.get("inferred_answer_index"),
-                "similarity": question.get("similarity"),
-                "answer_source": question.get("answer_source"),
-            }
-            if not answer["answer"]:
-                self.progress.fail(
-                    "没有找到可用答案",
-                    question_id=question.get("question_id"),
-                )
-                current["automation"] = {"status": "no_answer"}
-                break
 
-            self.progress.update(
-                "answer_ready",
-                f"答案已生成：{answer.get('answer_source')}",
-                current=len(steps) + 1,
-                question_id=question.get("question_id"),
-                answer_source=answer.get("answer_source"),
-                similarity=answer.get("similarity"),
-            )
-            request_context = envelope.get("request") or {}
-            self.progress.update(
-                "submitting",
-                "正在提交答案",
-                current=len(steps) + 1,
-                question_id=question.get("question_id"),
-                answer_source=answer.get("answer_source"),
-            )
-            submit_result = self.submitter.submit(question, answer, request_context)
+            bank = {
+                "answer": question.get("bank_answer"),
+                "answer_index": question.get("bank_answer_index"),
+                "source": question.get("bank_source"),
+                "similarity": question.get("bank_similarity"),
+                "explanation": question.get("bank_explanation"),
+            }
+            llm = {
+                "answer": question.get("llm_answer"),
+                "answer_index": question.get("llm_answer_index"),
+                "confidence": question.get("llm_confidence"),
+                "explanation": question.get("llm_explanation"),
+            }
+            agree = None
+            if bank["answer"] and llm["answer"]:
+                agree = (
+                    str(bank["answer"]).strip().upper()
+                    == str(llm["answer"]).strip().upper()
+                )
+
             step = {
-                "question_id": question.get("question_id"),
-                "answer": answer,
-                "submit_result": submit_result,
+                "question_id": question_id,
+                "bank": bank,
+                "llm": llm,
+                "agree": agree,
+                "submitted": False,
             }
             steps.append(step)
-            self.progress.update(
-                "submitted",
-                f"答案已提交，通道：{submit_result.get('transport')}",
-                current=len(steps),
-                question_id=question.get("question_id"),
-                transport=submit_result.get("transport"),
-            )
 
-            # 没有提交结果时停止，避免重复提交同一道题。
-            if not submit_result.get("body"):
-                current["automation"] = {
-                    "status": submit_result.get("transport"),
-                    "answer": answer,
-                    "submit_result": submit_result,
-                }
-                self.progress.fail(
-                    "提交未返回服务器响应",
-                    question_id=question.get("question_id"),
-                    transport=submit_result.get("transport"),
+            if not bank["answer"] and not llm["answer"]:
+                self.progress.fail("两个来源都没有给出答案", question_id=question_id)
+                current["automation"] = {"status": "no_answer", **step}
+            else:
+                self.progress.update(
+                    "answer_ready",
+                    f"答案已就绪：题库={bank['answer'] or '无'} / 大模型={llm['answer'] or '无'}"
+                    + ("（一致）" if agree else "（不一致，需人工判断）" if agree is False else ""),
+                    current=1,
+                    question_id=question_id,
+                    answer_source=bank["source"] or ("llm_api" if llm["answer"] else None),
+                    similarity=bank["similarity"] or llm["confidence"],
                 )
-                break
-
-            # 把服务器返回的 correct / analysis / nextQuestion 再送回管线。
-            current = self.pipeline.ingest(
-                {
-                    "request": {
-                        "method": "POST",
-                        "url": self.submitter.answer_url,
-                        "headers": request_context.get("headers", {}),
-                        "body": {
-                            "questionId": question.get("question_id"),
-                            "quizId": question.get("quiz_id"),
-                            # 归档要与真实提交一致，用转换后的序号。
-                            "answerIndex": self.submitter._submit_index(answer),
-                        },
-                    },
-                    "response": {
-                        "status_code": submit_result.get("status_code", 200),
-                        "body": submit_result.get("body"),
-                    },
-                },
-                source="charles_mcp_submit_result",
-            )
-            self.progress.update(
-                "response_saved",
-                "服务器响应已保存，准备处理下一题",
-                current=len(steps),
-                question_id=question.get("question_id"),
-                transport=submit_result.get("transport"),
-            )
-            envelope = {
-                "request": {
-                    "method": "POST",
-                    "url": self.submitter.answer_url,
-                    "headers": request_context.get("headers", {}),
-                }
-            }
+                self.progress.finish("已给出答案，等待人工选择（不会自动提交）", current=1)
+                current["automation"] = {"status": "ready_for_manual_choice", **step}
 
         first_result["automation_steps"] = steps
-        if current is not first_result:
-            first_result["follow_up"] = current
-        if steps and current.get("question") is None:
-            self.progress.finish("本轮自动答题完成", current=len(steps))
         return first_result
 
 

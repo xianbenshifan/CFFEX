@@ -64,6 +64,23 @@
     #events { height: 240px; overflow: auto; background: #060c18; border: 1px solid #1e293b; border-radius: 10px; padding: 11px; white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; color: #94a3b8; }
     .footer { margin-top: 18px; font-size: 11.5px; color: #475569; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
     .refresh-note { color: #64748b; }
+
+    /* 双来源答案 */
+    .answers { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+    .answer-block { background: #16213a; border: 1px solid #24304d; border-radius: 10px; padding: 14px 16px; }
+    .answer-block.bank { border-left: 4px solid #3b82f6; }
+    .answer-block.llm { border-left: 4px solid #a855f7; }
+    .answer-head { font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+    .answer-main { font-size: 30px; font-weight: 800; letter-spacing: 1px; }
+    .answer-block.bank .answer-main { color: #93c5fd; }
+    .answer-block.llm .answer-main { color: #d8b4fe; }
+    .answer-basis { font-size: 11.5px; color: #64748b; margin-top: 6px; }
+    .answer-note { font-size: 12px; color: #cbd5e1; margin-top: 8px; line-height: 1.5; }
+    .agree { margin-top: 12px; border-radius: 10px; padding: 11px 15px; font-size: 13.5px; font-weight: 600; background: #16213a; border: 1px solid #24304d; }
+    .agree.same { border-color: #15803d; background: #0f2a1d; color: #86efac; }
+    .agree.diff { border-color: #b45309; background: #2a1f0f; color: #fde68a; }
+    .agree.wait { color: #64748b; }
+    .hint { margin-top: 8px; font-size: 11.5px; color: #475569; }
   </style>
 </head>
 <body>
@@ -134,11 +151,28 @@
     <div class="card"><div class="label">当前阶段</div><div id="stage" class="value">idle</div></div>
     <div class="card"><div class="label">当前题目</div><div id="question" class="value">-</div></div>
     <div class="card"><div class="label">答案来源</div><div id="source" class="value">-</div></div>
-    <div class="card"><div class="label">提交通道</div><div id="transport" class="value">-</div></div>
     <div class="card"><div class="label">相似度 / 置信度</div><div id="similarity" class="value">-</div></div>
   </div>
   <div class="bar"><div id="bar"></div></div>
   <div id="message">等待事件…</div>
+
+  <h2>当前题目的两个来源答案</h2>
+  <div class="answers" id="answers">
+    <div class="answer-block bank">
+      <div class="answer-head">题库侧</div>
+      <div class="answer-main" id="bank-answer">-</div>
+      <div class="answer-basis" id="bank-basis"></div>
+      <div class="answer-note" id="bank-note"></div>
+    </div>
+    <div class="answer-block llm">
+      <div class="answer-head">大模型侧</div>
+      <div class="answer-main" id="llm-answer">-</div>
+      <div class="answer-basis" id="llm-basis"></div>
+      <div class="answer-note" id="llm-note"></div>
+    </div>
+  </div>
+  <div class="agree" id="agree">等待题目…</div>
+  <div class="hint">答案仅供参考，提交由你手动完成。</div>
 
   <h2>实时事件</h2>
   <div id="events"></div>
@@ -302,7 +336,7 @@
 
   // ---- 答题进度 ----
   const els = Object.fromEntries(
-    ["status","stage","question","source","transport","similarity","message","bar","events"]
+    ["status","stage","question","source","similarity","message","bar","events"]
       .map(id => [id, $(id)])
   );
   function render(event) {
@@ -311,7 +345,6 @@
     els.stage.textContent = s.stage || "-";
     els.question.textContent = s.question_id || "-";
     els.source.textContent = s.answer_source || "-";
-    els.transport.textContent = s.transport || "-";
     els.similarity.textContent = s.similarity == null ? "-" : Number(s.similarity).toFixed(4);
     els.message.textContent = `${s.message || ""}  [${event.at || ""}]`;
     const total = Number(s.total || 0), current = Number(s.current || 0);
@@ -322,8 +355,66 @@
     els.events.textContent = `${line}\n` + els.events.textContent;
   }
 
+  // ---- 双来源答案 ----
+  function letterOf(idx, raw) {
+    if (idx !== null && idx !== undefined && !isNaN(Number(idx))) {
+      const n = Number(idx);
+      if (n >= 0 && n < 26) return String.fromCharCode(65 + n);
+    }
+    const t = String(raw || "").trim().toUpperCase();
+    return t.length === 1 && t >= "A" && t <= "Z" ? t : "";
+  }
+
+  function renderAnswers(a) {
+    if (!a) return;
+    const bank = a.bank || {};
+    const llm = a.llm || {};
+
+    const bankLetter = letterOf(bank.answer_index, bank.answer);
+    const llmLetter = letterOf(llm.answer_index, llm.answer);
+
+    $("bank-answer").textContent = bankLetter || "未命中";
+    $("llm-answer").textContent = llmLetter || "未返回";
+
+    let bankBasis = bank.source || "—";
+    if (bank.similarity != null) bankBasis += ` ｜ 相似度 ${Number(bank.similarity).toFixed(4)}`;
+    $("bank-basis").textContent = bankBasis;
+    $("bank-note").textContent = bank.explanation || "";
+
+    let llmBasis = "DeepSeek";
+    if (llm.confidence != null) llmBasis += ` ｜ 置信度 ${Number(llm.confidence).toFixed(4)}`;
+    $("llm-basis").textContent = llmBasis;
+    $("llm-note").textContent = llm.explanation || "";
+
+    const agree = $("agree");
+    if (bankLetter && llmLetter) {
+      const same = bankLetter === llmLetter;
+      agree.className = "agree " + (same ? "same" : "diff");
+      agree.textContent = same
+        ? `两个来源一致：${bankLetter}`
+        : `两个来源不一致：题库 ${bankLetter} / 大模型 ${llmLetter} —— 请人工判断`;
+    } else if (bankLetter || llmLetter) {
+      agree.className = "agree diff";
+      agree.textContent = bankLetter
+        ? `只有题库给出答案：${bankLetter}（大模型未返回）`
+        : `只有大模型给出答案：${llmLetter}（题库未命中）`;
+    } else {
+      agree.className = "agree wait";
+      agree.textContent = "两个来源都没有给出答案";
+    }
+  }
+
+  function loadLatestAnswer() {
+    fetch("/automation/latest")
+      .then(r => r.json())
+      .then(d => { if (d.success && d.item) renderAnswers(d.item.answers); })
+      .catch(() => {});
+  }
+
   loadStatus();
   setInterval(loadStatus, 5000);
+  loadLatestAnswer();
+  setInterval(loadLatestAnswer, 5000);
 
   fetch("/progress").then(r => r.json()).then(x => (x.recent_events || []).forEach(render));
   const stream = new EventSource("/progress/stream");
