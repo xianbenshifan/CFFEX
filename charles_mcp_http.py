@@ -32,13 +32,22 @@ DEFAULT_PORT = 8931
 
 
 def _setup_logging() -> None:
-    """把日志写到文件并同时打到控制台。"""
+    """把日志写到文件（按大小轮转）并同时打到控制台。"""
     level = os.getenv("CHARLES_MCP_LOG_LEVEL", "INFO").upper()
     handlers = [logging.StreamHandler(sys.stdout)]
     log_dir = os.getenv("CHARLES_LOG_DIR") or os.path.join(os.getcwd(), "log")
     try:
         os.makedirs(log_dir, exist_ok=True)
-        handlers.append(logging.FileHandler(os.path.join(log_dir, "charles_mcp_http.log"), encoding="utf-8"))
+        from logging.handlers import RotatingFileHandler
+
+        handlers.append(
+            RotatingFileHandler(
+                os.path.join(log_dir, "charles_mcp_http.log"),
+                maxBytes=8 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+        )
     except OSError:
         pass
     logging.basicConfig(

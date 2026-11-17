@@ -81,12 +81,29 @@ except (ModuleNotFoundError, OSError) as exc:
         return None
 
 # 配置日志
+_log_handlers = [logging.StreamHandler(sys.stdout)]
+
+# 落盘日志按大小轮转，避免长期运行把磁盘写满。
+_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log")
+try:
+    os.makedirs(_log_dir, exist_ok=True)
+    from logging.handlers import RotatingFileHandler
+
+    _log_handlers.append(
+        RotatingFileHandler(
+            os.path.join(_log_dir, "proxy.log"),
+            maxBytes=8 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+    )
+except OSError:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=_log_handlers
 )
 logger = logging.getLogger(__name__)
 
