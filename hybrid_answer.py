@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Callable, Dict, Optional
 
 import requests
@@ -229,16 +230,25 @@ class HybridAnswerEngine:
                 {"role": "user", "content": prompt},
             ],
         }
+        # 降低推理深度：实测默认思考下多选题最慢 8.3 秒，设为 low 后最慢降到 2.6 秒，
+        # 而 12 道样例题的准确率保持 12/12。需要更强推理时可用 LLM_REASONING_EFFORT 覆盖。
+        effort = config.get("LLM_REASONING_EFFORT", "low")
+        if effort:
+            payload["reasoning_effort"] = effort
         try:
+            started = time.time()
             response = requests.post(
                 f"{self.llm_api_base}/chat/completions",
                 json=payload,
                 headers=headers,
-                # 实测 DeepSeek 思考模式单次 11~24 秒，默认 30 秒容易在波动时超时。
-                timeout=config.get_float("LLM_TIMEOUT", 60.0),
+                # 硬上限：超过这个时间就不再等，直接放弃大模型侧。
+                timeout=config.get_float("LLM_TIMEOUT", 8.0),
             )
             response.raise_for_status()
             body = response.json()
+            elapsed = time.time() - started
+            budget = config.get_float("LLM_TIMEOUT", 8.0)
+            logger.info("[LLM] 用时 %.2fs（预算 %.0fs）", elapsed, budget)
             content = body["choices"][0]["message"]["content"]
             result = self._parse_json(content)
             if not result.get("answer"):
@@ -260,7 +270,14 @@ class HybridAnswerEngine:
 
             result["answer_source"] = "llm_api"
             result["similarity"] = float(result.get("confidence") or 0)
+            result["elapsed"] = round(elapsed, 2)
             return result
+        except requests.Timeout:
+            logger.warning(
+                "LLM 超过 %.0fs 未返回，本题只保留题库侧答案",
+                config.get_float("LLM_TIMEOUT", 8.0),
+            )
+            return None
         except (OSError, requests.RequestException, KeyError, ValueError, TypeError) as exc:
             logger.warning("LLM 解析失败: %s", exc)
             return None

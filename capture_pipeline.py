@@ -180,6 +180,7 @@ class CapturePipeline:
         llm_index = None
         llm_explanation = None
         llm_confidence = None
+        llm_elapsed = None
 
         if self.answer_resolver and question_text:
             try:
@@ -213,6 +214,7 @@ class CapturePipeline:
                         llm_index = _answer_index(llm_answer, options)
                     llm_explanation = llm.get("explanation")
                     llm_confidence = llm.get("similarity")
+                    llm_elapsed = llm.get("elapsed")
                 # 兼容旧字段：优先填题库侧，没有题库结果才用大模型侧
                 if bank_answer:
                     answer, answer_index = bank_answer, bank_index
@@ -264,6 +266,7 @@ class CapturePipeline:
             "llm_answer_index": llm_index,
             "llm_explanation": llm_explanation,
             "llm_confidence": llm_confidence,
+            "llm_elapsed": llm_elapsed,
             "raw": next_question,
         }
         self.store.upsert_question(result, capture_id=capture_id)

@@ -479,6 +479,13 @@
       : "";
     let llmBasis = "DeepSeek";
     if (llm.confidence != null) llmBasis += ` ｜ 置信度 ${Number(llm.confidence).toFixed(4)}`;
+    if (llm.elapsed != null) {
+      const sec = Number(llm.elapsed);
+      llmBasis += ` ｜ 用时 ${sec.toFixed(2)}s`;
+      if (sec > 8) {
+        llmBasis += "（超 8s 预算）";
+      }
+    }
     $("llm-basis").textContent = llmBasis;
     $("llm-note").textContent = llm.explanation || "";
     $("llm-badge").textContent = llmLetter ? "llm_api" : "";

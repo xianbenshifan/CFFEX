@@ -932,6 +932,7 @@ def automation_latest():
                         "answer_index": llm_index,
                         "confidence": item.get("llm_confidence"),
                         "explanation": item.get("llm_explanation"),
+                        "elapsed": item.get("llm_elapsed"),
                         "answer_text": pick_text(options, llm_index, item.get("llm_answer")),
                     },
                 },

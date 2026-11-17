@@ -153,6 +153,7 @@ class QuizCaptureStore:
                     "llm_answer_index": "INTEGER",
                     "llm_explanation": "TEXT",
                     "llm_confidence": "REAL",
+                    "llm_elapsed": "REAL",
                 }.items():
                     if column not in existing_columns:
                         conn.execute(
@@ -234,11 +235,13 @@ class QuizCaptureStore:
                         bank_similarity, bank_explanation,
                         bank_matched_question, bank_matched_number, bank_matched_options_json,
                         llm_answer, llm_answer_index, llm_explanation, llm_confidence,
+                        llm_elapsed,
                         first_seen, last_seen, capture_id, raw_json
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?,
+                        ?,
                         ?, ?, ?, ?
                     )
                     ON CONFLICT(question_id) DO UPDATE SET
@@ -300,6 +303,9 @@ class QuizCaptureStore:
                         llm_confidence = COALESCE(
                             excluded.llm_confidence, questions.llm_confidence
                         ),
+                        llm_elapsed = COALESCE(
+                            excluded.llm_elapsed, questions.llm_elapsed
+                        ),
                         last_seen = excluded.last_seen,
                         capture_id = COALESCE(excluded.capture_id, questions.capture_id),
                         raw_json = excluded.raw_json
@@ -335,6 +341,7 @@ class QuizCaptureStore:
                         question.get("llm_answer_index"),
                         question.get("llm_explanation"),
                         question.get("llm_confidence"),
+                        question.get("llm_elapsed"),
                         now,
                         now,
                         capture_id,
@@ -533,6 +540,7 @@ class QuizCaptureStore:
             "llm_answer_index": row["llm_answer_index"],
             "llm_explanation": row["llm_explanation"],
             "llm_confidence": row["llm_confidence"],
+            "llm_elapsed": row["llm_elapsed"],
             "first_seen": row["first_seen"],
             "last_seen": row["last_seen"],
             "capture_id": row["capture_id"],

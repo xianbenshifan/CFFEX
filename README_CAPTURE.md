@@ -99,12 +99,26 @@ $env:CHARLES_MCP_EXPORT_TOOL = "charles_export_capture"
 LOCAL_MATCH_THRESHOLD=0.82
 DEEPSEEK_API_KEY=你的 DeepSeek API Key
 LLM_MODEL=deepseek-flash
-LLM_TIMEOUT=30
+LLM_TIMEOUT=8
+LLM_REASONING_EFFORT=low
 SUBMIT_INDEX_BASE=1
 ```
 
 `CHARLES_MCP_URL` 同样可写进 `.env`。
 真实环境变量优先于 `.env`，临时覆盖无需改文件。
+
+## 大模型响应时间
+
+目标：收到题目后 8 秒内给出大模型侧答案。实测 15 道样例题（单选 / 多选 / 判断各 5 道）：
+
+| 配置 | 平均 | 最慢 | 准确率 |
+|---|---|---|---|
+| 平台默认推理深度 | 2.4s | 8.3s | 12/12 |
+| `reasoning_effort=low` | **1.7s** | **2.6s** | **15/15** |
+| `max_tokens=200` 限长 | 1.6s | 1.9s | 7/12 ✗ |
+
+结论：用 `reasoning_effort=low` 而不是压缩输出长度 —— 后者会把多选题截断成单选。
+`LLM_TIMEOUT=8` 是硬上限，超时就不等大模型，只保留题库侧答案并在面板上标出。
 
 大模型只接 DeepSeek 官方一个平台（`LLM_API_BASE` 默认
 `https://api.deepseek.com/v1`）。
