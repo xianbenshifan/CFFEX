@@ -100,7 +100,7 @@ def main():
 
     print("=== 9b. 通道判定：必须是已知通道之一，并说明 stdio 限制 ===")
     channel = ss.check_capture_channel()
-    known = ("none", "mirror", "mirror_idle", "http_mcp", "http_mcp_down")
+    known = ("none", "http_mcp", "http_mcp_down")
     assert channel["channel"] in known, channel
     assert "stdio" in channel["stdio_mcp_note"]
     # 配置了 URL 就必须给出真实探测结果，而不是仅凭配置断定可用
@@ -122,7 +122,7 @@ def main():
 
     print("=== 11. 就绪判定：题库在线、通道正常时只保留降级提醒 ===")
     readiness = ss.check_readiness(
-        online, {"state": "online", "message": "齐备"}, capture_with("mirror")
+        online, {"state": "online", "message": "齐备"}, capture_with("http_mcp")
     )
     assert readiness["ready"] is True
     assert not any("抓包通道" in item for item in readiness["blockers"])
@@ -136,15 +136,7 @@ def main():
     assert any("抓包通道" in item for item in readiness["blockers"])
     print("   blockers:", readiness["blockers"])
 
-    print("=== 13. 就绪判定：Mirror 有文件但监听未跑必须阻塞 ===")
-    readiness = ss.check_readiness(
-        online, {"state": "online", "message": "齐备"}, capture_with("mirror_idle")
-    )
-    assert readiness["ready"] is False
-    assert any("watch_charles_mirror" in item for item in readiness["blockers"])
-    print("   blockers:", readiness["blockers"])
-
-    print("=== 14. 就绪判定：HTTP MCP 配了但连不上必须阻塞 ===")
+    print("=== 13. 就绪判定：HTTP MCP 配了但连不上必须阻塞 ===")
     readiness = ss.check_readiness(
         online, {"state": "online", "message": "齐备"}, capture_with("http_mcp_down")
     )

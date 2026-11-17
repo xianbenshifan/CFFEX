@@ -14,3 +14,4 @@ log/
 # 编辑器与本地状态
 .idea/
 .vscode/
+.uv-cache/

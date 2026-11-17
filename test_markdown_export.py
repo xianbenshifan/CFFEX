@@ -1,5 +1,6 @@
 """答题记录 Markdown 导出的回归测试。"""
 # -*- coding: utf-8 -*-
+import hashlib
 import os
 import tempfile
 
@@ -27,6 +28,8 @@ def main():
     assert index_to_letter(0) == "A"
     assert index_to_letter("2") == "C"
     assert index_to_letter("c") == "C"
+    assert index_to_letter("ABD") == "ABD"
+    assert index_to_letter("D, B, A") == "ABD"
     assert index_to_letter(None) is None
 
     # 服务器标准答案：rightIndex 是 MD5(1 基序号)，不能按 0 基或纯数字解析。
@@ -35,6 +38,9 @@ def main():
     assert server_index_to_letter("ECCBC87E4B5CE2FE28308FD9F2A7BAF3") == "C"
     assert server_index_to_letter("A87FF679A2F3E71D9181A67B7542122C") == "D"
     assert server_index_to_letter("2") == "B"  # 数字串按 1 基
+    assert server_index_to_letter("1,2,4") == "ABD"
+    multi = hashlib.md5(b"1,2,4").hexdigest().upper()
+    assert server_index_to_letter(multi) == "ABD"
     assert server_index_to_letter(None) is None
     assert server_index_to_letter("") is None
 

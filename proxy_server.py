@@ -316,7 +316,8 @@ def get_capture_pipeline() -> CapturePipeline:
     if _capture_pipeline is None:
         _capture_pipeline = CapturePipeline(
             store=_capture_store,
-            answer_resolver=get_hybrid_engine().resolve_both,
+            answer_resolver=get_hybrid_engine().resolve_bank_view,
+            llm_resolver=get_hybrid_engine()._resolve_with_llm,
         )
     return _capture_pipeline
 
@@ -933,6 +934,7 @@ def automation_latest():
                         "confidence": item.get("llm_confidence"),
                         "explanation": item.get("llm_explanation"),
                         "elapsed": item.get("llm_elapsed"),
+                        "status": item.get("llm_status"),
                         "answer_text": pick_text(options, llm_index, item.get("llm_answer")),
                     },
                 },
@@ -1239,31 +1241,8 @@ if __name__ == '__main__':
     logger.info("东方财富答题镜像服务启动")
     logger.info(f"监听地址: http://{host}:{port}")
     logger.info("=" * 60)
-    logger.info("📋 镜像模式 - 只接收数据，不发送响应")
-    logger.info("=" * 60)
-    logger.info("")
-    logger.info("⚠️  重要：不要配置Charles Map Remote！")
-    logger.info("   让Charles正常转发所有请求到真实服务器")
-    logger.info("")
-    logger.info("配置方法（推荐手动方式）:")
-    logger.info("")
-    logger.info("1. 在Charles中查看题目响应")
-    logger.info("   - 找到 quiz-activity.eastmoney.com/qa/api/quiz/* 的响应")
-    logger.info("   - 复制响应JSON数据")
-    logger.info("")
-    logger.info("2. 发送到Flask服务:")
-    logger.info("   curl -X POST http://localhost:8889/qa/api/quiz/receive \\")
-    logger.info("     -H 'Content-Type: application/json' \\")
-    logger.info("     -d '{\"data\": {粘贴响应数据}}'")
-    logger.info("")
-    logger.info("3. 或者使用Python脚本自动发送（见文档）")
-    logger.info("")
-    logger.info("服务接口:")
-    logger.info("   POST /qa/api/quiz/receive - 接收题目响应（搜题）")
-    logger.info("   POST /qa/api/quiz/answer - 接收答案提交（对比）")
-    logger.info("   GET /cache - 查看缓存")
-    logger.info("")
-    logger.info("详细配置请查看: Charles镜像配置步骤.md")
+    logger.info("收题走 Charles HTTP MCP，答案只展示不自动提交")
+    logger.info("面板见 start.bat 打印的地址，路径 /dashboard")
     logger.info("=" * 60)
     
     app.run(host=host, port=port, debug=False, threaded=True)

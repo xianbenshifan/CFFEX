@@ -287,8 +287,6 @@
     const CHANNEL_TEXT = {
       http_mcp: "HTTP MCP 已连通",
       http_mcp_down: "HTTP MCP 连不上",
-      mirror: "Mirror 监听",
-      mirror_idle: "Mirror 未监听",
       none: "无可用通道",
     };
     $("capture-msg").textContent = cap.message;
@@ -375,8 +373,30 @@
     ["status","stage","question","source","similarity","message","bar","events"]
       .map(id => [id, $(id)])
   );
+  let activeQuestionId = null;
+
+  function clearLlm() {
+    $("llm-answer").textContent = "搜索中";
+    $("llm-picked").textContent = "";
+    $("llm-basis").textContent = "";
+    $("llm-note").textContent = "";
+    $("llm-badge").textContent = "搜索中";
+    $("llm-badge").className = "answer-badge";
+    const agree = $("agree");
+    agree.className = "agree wait";
+    agree.textContent = "大模型搜索中";
+  }
+
+  function watchQuestion(id) {
+    const next = id == null || id === "" ? null : String(id);
+    if (!next || next === activeQuestionId) return;
+    activeQuestionId = next;
+    clearLlm();
+  }
+
   function render(event) {
     const s = event.data || {};
+    watchQuestion(s.question_id);
     els.status.textContent = s.status || "-";
     els.stage.textContent = s.stage || "-";
     els.question.textContent = s.question_id || "-";
@@ -472,9 +492,12 @@
     badge.textContent = belowThreshold ? "低于阈值" : (bank.source || "");
     badge.className = "answer-badge" + (belowThreshold ? " warn" : "");
 
-    // 大模型侧
-    $("llm-answer").textContent = llmLetter || "未返回";
-    $("llm-picked").textContent = llmLetter
+    // 只有这一题已经生成完的答案才能显示。pending 一律是搜索中，不沿用任何字母。
+    const llmPending = llm.status === "pending";
+    const showLlm = !llmPending && llm.status !== "failed" && !!llmLetter
+      && (llm.status === "ready" || llm.status == null || llm.status === "");
+    $("llm-answer").textContent = showLlm ? llmLetter : (llm.status === "failed" ? "未返回" : "搜索中");
+    $("llm-picked").textContent = showLlm && llmLetter
       ? `选中：${llm.answer_text || pickTexts(item.options, llmLetters) || "（未返回选项内容）"}`
       : "";
     let llmBasis = "DeepSeek";
@@ -486,9 +509,9 @@
         llmBasis += "（超 8s 预算）";
       }
     }
-    $("llm-basis").textContent = llmBasis;
-    $("llm-note").textContent = llm.explanation || "";
-    $("llm-badge").textContent = llmLetter ? "llm_api" : "";
+    $("llm-basis").textContent = showLlm ? llmBasis : "";
+    $("llm-note").textContent = showLlm ? (llm.explanation || "") : "";
+    $("llm-badge").textContent = showLlm ? "llm_api" : (llm.status === "failed" ? "" : "搜索中");
     $("llm-badge").className = "answer-badge";
 
     // 题库匹配到的原题（多选也高亮全部命中项）
@@ -504,17 +527,23 @@
 
     // 一致性结论（按字母集合比较，支持多选）
     const agree = $("agree");
-    if (bankLetter && llmLetter) {
+    if (bankLetter && showLlm && llmLetter) {
       const same = bankLetter === llmLetter;
       agree.className = "agree " + (same ? "same" : "diff");
       agree.textContent = same
         ? `两个来源一致：${bankLetter}`
         : `两个来源不一致：题库 ${bankLetter} / 大模型 ${llmLetter} —— 请人工判断`;
-    } else if (bankLetter || llmLetter) {
+    } else if (showLlm && llmLetter) {
       agree.className = "agree diff";
+      agree.textContent = `只有大模型给出答案：${llmLetter}（题库未命中）`;
+    } else if (!showLlm && llm.status !== "failed") {
+      agree.className = "agree wait";
       agree.textContent = bankLetter
-        ? `只有题库给出答案：${bankLetter}（大模型未返回）`
-        : `只有大模型给出答案：${llmLetter}（题库未命中）`;
+        ? `题库 ${bankLetter}。大模型搜索中`
+        : "大模型搜索中";
+    } else if (bankLetter) {
+      agree.className = "agree diff";
+      agree.textContent = `只有题库给出答案：${bankLetter}（大模型未返回）`;
     } else {
       agree.className = "agree wait";
       agree.textContent = "两个来源都没有给出答案";
@@ -522,16 +551,23 @@
   }
 
   function loadLatestAnswer() {
+    const requestedId = activeQuestionId;
     fetch("/automation/latest")
       .then(r => r.json())
-      .then(d => { if (d.success && d.item) renderAnswers(d.item); })
+      .then(d => {
+        if (!d.success || !d.item) return;
+        const id = String(d.item.question_id || "");
+        if (requestedId && id !== requestedId) return;
+        if (activeQuestionId && id !== activeQuestionId) return;
+        renderAnswers(d.item);
+      })
       .catch(() => {});
   }
 
   loadStatus();
   setInterval(loadStatus, 5000);
   loadLatestAnswer();
-  setInterval(loadLatestAnswer, 5000);
+  setInterval(loadLatestAnswer, 1000);
 
   fetch("/progress").then(r => r.json()).then(x => (x.recent_events || []).forEach(render));
   const stream = new EventSource("/progress/stream");

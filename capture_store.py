@@ -154,6 +154,7 @@ class QuizCaptureStore:
                     "llm_explanation": "TEXT",
                     "llm_confidence": "REAL",
                     "llm_elapsed": "REAL",
+                    "llm_status": "TEXT",
                 }.items():
                     if column not in existing_columns:
                         conn.execute(
@@ -357,7 +358,11 @@ class QuizCaptureStore:
         analysis: Any = None,
         right_index: Any = None,
     ) -> None:
-        """把答案提交后的服务器结果回写到对应题目。"""
+        """把答案提交后的服务器结果回写到对应题目。
+
+        不改 last_seen。面板按 last_seen 取当前题，回写判定不能把刚答完的题
+        重新排到正在作答的下一题前面。
+        """
         if question_id is None:
             return
         with self._lock, closing(self._connect()) as conn:
@@ -368,8 +373,7 @@ class QuizCaptureStore:
                     SET server_correct = COALESCE(?, server_correct),
                         server_answer_index = COALESCE(?, server_answer_index),
                         server_analysis = COALESCE(?, server_analysis),
-                        server_right_index = COALESCE(?, server_right_index),
-                        last_seen = ?
+                        server_right_index = COALESCE(?, server_right_index)
                     WHERE question_id = ?
                     """,
                     (
@@ -377,7 +381,46 @@ class QuizCaptureStore:
                         answer_index,
                         analysis,
                         right_index,
-                        utc_now(),
+                        str(question_id),
+                    ),
+                )
+
+    def set_llm_status(self, question_id: Any, status: str) -> None:
+        """标记大模型是还在搜索，还是已经结束。"""
+        if question_id is None:
+            return
+        with self._lock, closing(self._connect()) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE questions SET llm_status = ? WHERE question_id = ?",
+                    (status, str(question_id)),
+                )
+
+    def update_llm(self, question_id: Any, result: Optional[Dict[str, Any]], status: str) -> None:
+        """写入大模型结论。失败时不保留半截答案。"""
+        if question_id is None:
+            return
+        result = result or {}
+        with self._lock, closing(self._connect()) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE questions
+                    SET llm_answer = ?,
+                        llm_answer_index = ?,
+                        llm_explanation = ?,
+                        llm_confidence = ?,
+                        llm_elapsed = ?,
+                        llm_status = ?
+                    WHERE question_id = ?
+                    """,
+                    (
+                        result.get("answer"),
+                        result.get("answer_index"),
+                        result.get("explanation"),
+                        result.get("similarity"),
+                        result.get("elapsed"),
+                        status,
                         str(question_id),
                     ),
                 )
@@ -387,9 +430,33 @@ class QuizCaptureStore:
         submission: Dict[str, Any],
         capture_id: Optional[int] = None,
     ) -> None:
-        """保存一次答案提交及服务器返回的正确性/解析。"""
+        """保存一次答案提交及服务器返回的正确性/解析。
+
+        同一题、同一选项、同一判定再进来时不另插一行。抓包重放会把同一条
+        提交写成几十行。
+        """
+        question_id = str(submission.get("question_id") or "")
+        submitted = (
+            "" if submission.get("submitted_answer") is None
+            else str(submission.get("submitted_answer"))
+        )
+        analysis = submission.get("server_analysis")
+        correct = submission.get("server_correct")
         with self._lock, closing(self._connect()) as conn:
             with conn:
+                existing = conn.execute(
+                    """
+                    SELECT id FROM submissions
+                    WHERE question_id = ?
+                      AND submitted_answer = ?
+                      AND server_correct IS ?
+                      AND ifnull(server_analysis, '') = ifnull(?, '')
+                    LIMIT 1
+                    """,
+                    (question_id, submitted, correct, analysis),
+                ).fetchone()
+                if existing:
+                    return
                 conn.execute(
                     """
                     INSERT INTO submissions (
@@ -399,13 +466,12 @@ class QuizCaptureStore:
                     """,
                     (
                         submission.get("captured_at") or utc_now(),
-                        str(submission.get("question_id") or ""),
+                        question_id,
                         str(submission.get("quiz_id") or ""),
                         # 选项索引 0 是合法提交（A），不能被 "or" 吞成空串。
-                        "" if submission.get("submitted_answer") is None
-                        else str(submission.get("submitted_answer")),
-                        submission.get("server_correct"),
-                        submission.get("server_analysis"),
+                        submitted,
+                        correct,
+                        analysis,
                         json_text(submission.get("raw") or submission),
                         capture_id,
                     ),
@@ -541,6 +607,7 @@ class QuizCaptureStore:
             "llm_explanation": row["llm_explanation"],
             "llm_confidence": row["llm_confidence"],
             "llm_elapsed": row["llm_elapsed"],
+            "llm_status": row["llm_status"] if "llm_status" in row.keys() else None,
             "first_seen": row["first_seen"],
             "last_seen": row["last_seen"],
             "capture_id": row["capture_id"],

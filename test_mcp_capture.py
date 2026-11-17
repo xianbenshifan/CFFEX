@@ -96,6 +96,39 @@ def main():
     assert poller._slow_streak == 0
     print("   ok: 连续 3 次超过 3 秒即熔断")
 
+    print("=== 8. 处理与轮询解耦：慢 handler 不阻塞 _poll_once ===")
+    import time as _t
+
+    class SlowHandler:
+        """模拟大模型调用，固定耗时 1.2 秒。"""
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, envelope):
+            _t.sleep(1.2)
+            self.calls += 1
+
+    p2 = McpCapturePoller(handler=SlowHandler(), endpoint="http://127.0.0.1:1/mcp")
+    assert p2._queue is not None
+    assert p2.stats["handled"] == 0
+    # 直接投递两条，模拟 _poll_once 只入队的行为
+    p2._queue.put({"request": {"host": "quiz-activity.eastmoney.com",
+                               "path": "/qa/api/quiz/x"}, "response": {"body": {}}})
+    p2._queue.put({"request": {"host": "quiz-activity.eastmoney.com",
+                               "path": "/qa/api/quiz/answer"}, "response": {"body": {}}})
+    assert p2._queue.qsize() == 2
+    # 起 worker 后应能异步消费
+    import threading as _th
+
+    p2._worker_stop.clear()
+    w = _th.Thread(target=p2._worker, daemon=True)
+    w.start()
+    _t.sleep(2.8)
+    p2._worker_stop.set()
+    assert p2.stats["handled"] == 2, p2.stats
+    print(f"   ok: 队列消费正常，handler 调用 {p2.stats['handled']} 次")
+
     print("mcp capture test passed")
 
 

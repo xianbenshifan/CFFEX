@@ -15,6 +15,7 @@ import hashlib
 import os
 import tempfile
 from datetime import datetime
+from itertools import combinations
 from typing import Any, Dict, List, Optional
 
 from capture_store import QuizCaptureStore
@@ -35,7 +36,10 @@ def default_markdown_path() -> str:
 
 
 def index_to_letter(value: Any) -> Optional[str]:
-    """把本地推断的 0-based 索引或字母统一成大写选项字母。"""
+    """把本地推断的 0-based 索引或字母统一成大写选项字母。
+
+    多选题答案是连写字母（如 ABD）。只认单个字母会把整道多选显示成未命中。
+    """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -43,43 +47,73 @@ def index_to_letter(value: Any) -> Optional[str]:
     text = str(value).strip().upper()
     if not text:
         return None
-    if len(text) == 1 and "A" <= text <= "Z":
-        return text
+    compact = "".join(ch for ch in text if ch not in " \t,，、;；")
+    if compact and all("A" <= ch <= "Z" for ch in compact):
+        return "".join(sorted(set(compact)))
     if text.isdigit():
         index = int(text)
         return chr(ord("A") + index) if 0 <= index < 26 else None
     return None
 
 
-# 服务器把标准答案编码成 MD5(序号)，序号从 1 开始。
-# 实测 151 条抓包全部落在 1..选项数，按 1 基解释 151/151 合法、按 0 基仅 103/151。
-_SERVER_INDEX_DIGESTS = {
-    hashlib.md5(str(index).encode()).hexdigest().upper(): index for index in range(1, 27)
-}
+def _letters_from_server_token(token: str) -> Optional[str]:
+    """把服务器的 1 基序号串还原成选项字母。
+
+    单选是 "2"，多选是 "1,2,4"。0 不对应任何选项。
+    """
+    parts = [part.strip() for part in token.split(",") if part.strip()]
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    letters: List[str] = []
+    for part in parts:
+        index = int(part)
+        if not 1 <= index <= 26:
+            return None
+        letters.append(chr(ord("A") + index - 1))
+    return "".join(letters)
+
+
+def _server_digest_map() -> Dict[str, str]:
+    """MD5(1 基序号串) → 选项字母。
+
+    单选是 MD5("2")，多选是 MD5("1,2,4") 这种升序逗号串，不是逐个选项各一个 MD5。
+    """
+    found: Dict[str, str] = {}
+    indexes = range(1, 11)
+    for size in range(1, len(indexes) + 1):
+        for combo in combinations(indexes, size):
+            token = ",".join(str(index) for index in combo)
+            letters = _letters_from_server_token(token)
+            if not letters:
+                continue
+            digest = hashlib.md5(token.encode()).hexdigest().upper()
+            found[digest] = letters
+    return found
+
+
+_SERVER_INDEX_DIGESTS = _server_digest_map()
 
 
 def server_index_to_letter(value: Any) -> Optional[str]:
     """把服务器返回的标准答案解码成选项字母。
 
     服务器字段有两种形态：
-    - rightIndex：MD5(1 基序号)，如 C4CA4238... 对应 1，即 A；
-    - answerIndex / correctAnswerIndex：1 基序号，如 2 表示 B。
+    - rightIndex：MD5(1 基序号串)，单选 MD5("1") 为 A，多选 MD5("1,2,4") 为 ABD；
+    - 明文序号：2 表示 B，1,2 表示 AB。
 
-    两者都是 1 基，所以 0 与空值一律返回 None，不猜 A。
+    序号从 1 起，所以 0 与空值一律返回 None。
     """
     if value is None or isinstance(value, bool):
         return None
     text = str(value).strip().upper()
     if not text:
         return None
-    if len(text) == 1 and "A" <= text <= "Z":
-        return text
-    index = _SERVER_INDEX_DIGESTS.get(text)
-    if index is None and text.isdigit():
-        index = int(text)
-    if index is None or not 1 <= index <= 26:
-        return None
-    return chr(ord("A") + index - 1)
+    if text.isalpha() and all("A" <= ch <= "Z" for ch in text):
+        return "".join(sorted(set(text)))
+    hashed = _SERVER_INDEX_DIGESTS.get(text)
+    if hashed:
+        return hashed
+    return _letters_from_server_token(text)
 
 
 def _option_lines(options: Any) -> List[str]:
@@ -125,22 +159,31 @@ def _submitted_letter(value: Any) -> Optional[str]:
     text = str(value).strip().upper()
     if not text:
         return None
-    if len(text) == 1 and "A" <= text <= "Z":
-        return text
-    if text.isdigit():
+    compact = "".join(ch for ch in text if ch not in " \t,，、;；")
+    if compact and all("A" <= ch <= "Z" for ch in compact):
+        return "".join(sorted(set(compact)))
+    parts = [part.strip() for part in text.replace("，", ",").split(",") if part.strip()]
+    if parts and all(part.isdigit() for part in parts):
         base = config.get_int("SUBMIT_INDEX_BASE", 1)
-        index = int(text) - base if base == 1 else int(text)
-        return chr(ord("A") + index) if 0 <= index < 26 else None
+        letters: List[str] = []
+        for part in parts:
+            index = int(part) - base if base == 1 else int(part)
+            if not 0 <= index < 26:
+                return None
+            letters.append(chr(ord("A") + index))
+        return "".join(letters)
     return None
 
 
 def _render_two_sources(question: Dict[str, Any]) -> List[str]:
     """并排渲染题库侧与大模型侧两份答案，供人工选择。"""
-    bank_letter = index_to_letter(question.get("bank_answer_index")) or index_to_letter(
-        question.get("bank_answer")
+    # 字母答案优先于序号。模型自报的 answer_index 经常和字母不一致，
+    # 先看序号会把正确的 C 显示成 A。
+    bank_letter = index_to_letter(question.get("bank_answer")) or index_to_letter(
+        question.get("bank_answer_index")
     )
-    llm_letter = index_to_letter(question.get("llm_answer_index")) or index_to_letter(
-        question.get("llm_answer")
+    llm_letter = index_to_letter(question.get("llm_answer")) or index_to_letter(
+        question.get("llm_answer_index")
     )
     bank_source = question.get("bank_source")
     bank_sim = question.get("bank_similarity")
@@ -169,7 +212,9 @@ def _render_two_sources(question: Dict[str, Any]) -> List[str]:
     else:
         lines.append("| 题库 | 未命中 | — |")
 
-    if llm_letter:
+    if question.get("llm_status") == "pending" and not llm_letter:
+        lines.append("| 大模型 | 搜索中 | 正在生成 |")
+    elif llm_letter:
         basis = "大模型"
         if llm_conf is not None:
             try:

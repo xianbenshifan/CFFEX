@@ -18,7 +18,7 @@ import requests
 import config
 from capture_pipeline import CapturePipeline
 from capture_store import QuizCaptureStore
-from hybrid_answer import HybridAnswerEngine
+from hybrid_answer import HybridAnswerEngine, answer_letters
 from progress_tracker import ProgressTracker, get_progress_tracker
 
 logger = logging.getLogger(__name__)
@@ -120,7 +120,9 @@ class QuizAutomation:
         # 双来源：题库侧（精确 + 语义）与大模型侧并列给出，不自动提交。
         self.engine = HybridAnswerEngine(local_resolver=local_resolver)
         self.pipeline = CapturePipeline(
-            store=store, answer_resolver=self.engine.resolve_both
+            store=store,
+            answer_resolver=self.engine.resolve_bank_view,
+            llm_resolver=self.engine._resolve_with_llm,
         )
         self.submitter = AnswerSubmitter()
         self.store = store
@@ -164,11 +166,10 @@ class QuizAutomation:
                 "explanation": question.get("llm_explanation"),
             }
             agree = None
-            if bank["answer"] and llm["answer"]:
-                agree = (
-                    str(bank["answer"]).strip().upper()
-                    == str(llm["answer"]).strip().upper()
-                )
+            bank_letters = answer_letters(bank["answer"])
+            llm_letters = answer_letters(llm["answer"])
+            if bank_letters and llm_letters:
+                agree = bank_letters == llm_letters
 
             step = {
                 "question_id": question_id,
@@ -179,7 +180,18 @@ class QuizAutomation:
             }
             steps.append(step)
 
-            if not bank["answer"] and not llm["answer"]:
+            if question.get("llm_status") == "pending":
+                self.progress.update(
+                    "answer_ready",
+                    "题目已显示，大模型搜索中",
+                    current=1,
+                    question_id=question_id,
+                    answer_source=bank["source"],
+                    similarity=bank["similarity"],
+                )
+                self.progress.finish("题目已显示，大模型搜索中", current=1)
+                current["automation"] = {"status": "llm_pending", **step}
+            elif not bank["answer"] and not llm["answer"]:
                 self.progress.fail("两个来源都没有给出答案", question_id=question_id)
                 current["automation"] = {"status": "no_answer", **step}
             else:

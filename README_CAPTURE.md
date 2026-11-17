@@ -28,12 +28,11 @@ capture_data/quiz_capture.db
 ## 启动
 
 ```powershell
-python proxy_server.py
-python watch_charles_mirror.py
+start.bat
 ```
 
-`watch_charles_mirror.py` 仍兼容旧版 Mirror 文件，同时优先把原始响应送到
-`/mcp/charles/capture`，不会丢失服务器字段。
+或分别启动 `python charles_mcp_http.py` 与 `python proxy_server.py`。
+手机流量走 Charles，服务通过 HTTP MCP 收题，不把题目请求改写到本机。
 
 ## Charles MCP bridge 信封
 
@@ -154,13 +153,14 @@ Charles Web API 与 `charles-mcp` 都只提供查询接口，没有 websocket / 
 # 查看当前间隔与实测轮询次数
 curl http://127.0.0.1:8889/mcp/capture/status
 
-# 调到 0.5 秒
-curl -X POST http://127.0.0.1:8889/mcp/capture/interval -H "Content-Type: application/json" -d '{"interval":0.5}'
+# 调到 1 秒
+curl -X POST http://127.0.0.1:8889/mcp/capture/interval -H "Content-Type: application/json" -d '{"interval":1}'
 ```
 
 允许范围 0.2–60 秒，超出会被钳制；非法值回落到 1 秒。
 
-实际周期 = 间隔 + 单次查询耗时。设 0.5 秒时实测约 0.75 秒一次。
+实际周期 = 间隔 + 单次查询耗时。间隔 1 秒、单次查询约 0.2 秒时，大约 1.2 秒一轮。
+每一轮对应一次新的 MCP 会话，日志里会连着打出几条 HTTP 请求。
 
 `.env` 里的 `MCP_POLL_INTERVAL` 只在启动收题时读取，运行中改它不生效。
 

@@ -66,7 +66,53 @@ def main():
         )
         assert store.stats()["submissions"] == 1
         assert store.stats()["captures"] == 2
-        print(json.dumps(store.get_question("123"), ensure_ascii=False, indent=2))
+        pipeline.ingest(
+            {
+                "request": {
+                    "method": "POST",
+                    "url": "https://TARGET/answer",
+                    "body": {"questionId": 123, "quizId": 1, "answerIndex": 0},
+                },
+                "response": {"status_code": 200, "body": answer_response},
+            }
+        )
+        assert store.stats()["submissions"] == 1
+
+        right = "C81E728D9D4C2F636F067F89CC14862C"
+        pipeline.ingest(
+            {
+                "request": {
+                    "method": "POST",
+                    "url": "https://TARGET/answer",
+                    "body": {"text": json.dumps({"questionId": 123, "quizId": 1, "answerIndex": "1,2"})},
+                },
+                "response": {
+                    "status_code": 200,
+                    "body": {
+                        "data": {
+                            "correct": True,
+                            "rightIndex": right,
+                            "analysis": "上一题解析",
+                            "nextQuestion": {
+                                "questionId": 124,
+                                "questionTitle": "下一题",
+                                "answers": ["甲", "乙"],
+                                "type": "S",
+                            },
+                        }
+                    },
+                },
+            }
+        )
+        saved = store.get_question("123")
+        nxt = store.get_question("124")
+        assert saved["server_right_index"] == right, saved["server_right_index"]
+        assert saved["server_analysis"] == "上一题解析"
+        assert nxt["server_right_index"] in (None, ""), nxt["server_right_index"]
+        assert nxt["server_analysis"] in (None, "")
+        assert nxt["question_title"] == "下一题"
+        latest = store.list_questions(limit=1)[0]
+        assert latest["question_id"] == "124", latest["question_id"]
         print("capture pipeline test passed")
 
 

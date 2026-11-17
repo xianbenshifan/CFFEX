@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any, Callable, Dict, Optional
 
 from capture_store import QuizCaptureStore
@@ -19,16 +20,33 @@ from markdown_export import export_markdown
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_text_body(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Charles 有时把 JSON 请求体包在 text 字段里。
+
+    不拆开的话 questionId 读不到，这道题的对错和标准答案就不会写回题目。
+    """
+    text = body.get("text")
+    if not isinstance(text, str):
+        return body
+    if "questionId" in body or "answerIndex" in body:
+        return body
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return body
+    return parsed if isinstance(parsed, dict) else body
+
+
 def _as_dict(value: Any) -> Dict[str, Any]:
     """把字符串或对象转换成字典。"""
     if isinstance(value, dict):
-        return value
+        return _unwrap_text_body(value)
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
         except json.JSONDecodeError:
             return {}
+        return _unwrap_text_body(parsed) if isinstance(parsed, dict) else {}
     return {}
 
 
@@ -86,11 +104,13 @@ class CapturePipeline:
     def __init__(
         self,
         store: QuizCaptureStore,
-        answer_resolver: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+        answer_resolver: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
         markdown_path: Optional[str] = None,
+        llm_resolver: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
     ) -> None:
         self.store = store
         self.answer_resolver = answer_resolver
+        self.llm_resolver = llm_resolver
         self.markdown_path = markdown_path
 
     def ingest(self, payload: Dict[str, Any], source: str = "charles_mcp") -> Dict[str, Any]:
@@ -157,11 +177,9 @@ class CapturePipeline:
                 f"{chr(65 + index)}. {text}" for index, text in enumerate(option_texts)
             )
 
-        server_analysis = (
-            next_question.get("analysis")
-            or response_data.get("analysis")
-            or response_data.get("remark")
-        )
+        # 答案接口 data 上的 analysis / rightIndex 属于刚提交的那一题，
+        # 不能写到 data.nextQuestion。否则下一题会继承上一题的标准答案。
+        server_analysis = next_question.get("analysis") or next_question.get("remark")
 
         answer = None
         similarity = None
@@ -184,7 +202,10 @@ class CapturePipeline:
 
         if self.answer_resolver and question_text:
             try:
-                match = self.answer_resolver(question_text)
+                try:
+                    match = self.answer_resolver(question_text, options)
+                except TypeError:
+                    match = self.answer_resolver(question_text)
             except Exception:
                 logger.exception("题目答案解析失败: question_id=%s", question_id)
                 match = None
@@ -249,7 +270,7 @@ class CapturePipeline:
             "server_analysis": server_analysis,
             "answer_explanation": answer_explanation,
             "server_correct_index": next_question.get("answerIndex"),
-            "server_right_index": response_data.get("rightIndex"),
+            "server_right_index": next_question.get("rightIndex"),
             "inferred_answer": answer,
             "inferred_answer_index": answer_index,
             "similarity": similarity,
@@ -267,10 +288,49 @@ class CapturePipeline:
             "llm_explanation": llm_explanation,
             "llm_confidence": llm_confidence,
             "llm_elapsed": llm_elapsed,
+            "llm_status": None,
             "raw": next_question,
         }
+        prior = self.store.get_question(question_id) if question_id else None
+        if prior and prior.get("llm_answer"):
+            result["llm_answer"] = prior.get("llm_answer")
+            result["llm_answer_index"] = prior.get("llm_answer_index")
+            result["llm_explanation"] = prior.get("llm_explanation")
+            result["llm_confidence"] = prior.get("llm_confidence")
+            result["llm_elapsed"] = prior.get("llm_elapsed")
+            result["llm_status"] = prior.get("llm_status") or "ready"
+        elif prior and prior.get("llm_status") == "pending":
+            result["llm_status"] = "pending"
+        elif self.llm_resolver and question_id and not result.get("llm_answer"):
+            result["llm_status"] = "pending"
+        elif result.get("llm_answer"):
+            result["llm_status"] = "ready"
         self.store.upsert_question(result, capture_id=capture_id)
+        if result.get("llm_status") == "pending" and not (
+            prior and prior.get("llm_status") == "pending"
+        ):
+            self.store.set_llm_status(question_id, "pending")
+            self._schedule_llm(question_id, question_text, options)
         return result
+
+    def _schedule_llm(self, question_id: str, question_text: str, options: Any) -> None:
+        """题目先入库。大模型返回后再补上答案，不挡住面板。"""
+
+        def run() -> None:
+            try:
+                found = self.llm_resolver(question_text, options)
+            except Exception:
+                logger.exception("大模型补答失败: question_id=%s", question_id)
+                found = None
+            if found and found.get("answer"):
+                self.store.update_llm(question_id, found, status="ready")
+            else:
+                self.store.update_llm(question_id, None, status="failed")
+            self._export_markdown()
+
+        threading.Thread(
+            target=run, daemon=True, name=f"llm-{question_id}"
+        ).start()
 
     def _save_submission(
         self,
