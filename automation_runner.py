@@ -18,7 +18,6 @@ import requests
 import config
 from capture_pipeline import CapturePipeline
 from capture_store import QuizCaptureStore
-from charles_mcp_adapter import CharlesMcpClient
 from hybrid_answer import HybridAnswerEngine
 from progress_tracker import ProgressTracker, get_progress_tracker
 
@@ -26,15 +25,17 @@ logger = logging.getLogger(__name__)
 
 
 class AnswerSubmitter:
-    """把答案提交到 Charles MCP bridge 或目标 API。"""
+    """把答案提交到目标 API。
 
-    def __init__(self, mcp: Optional[CharlesMcpClient] = None) -> None:
-        self.mcp = mcp
+    MCP 只用于收题：`charles-mcp` 暴露的工具里没有任何能凭空发出新请求的能力
+    （`reverse_replay_entry` 只能重放已存在的抓包条目），因此提交一律直连。
+    """
+
+    def __init__(self) -> None:
         self.answer_url = config.get(
             "QUIZ_ANSWER_URL",
             "https://quiz-activity.eastmoney.com/qa/api/quiz/answer",
         )
-        self.prefer_mcp = config.get_int("PREFER_CHARLES_MCP", 1) == 1
         self.allow_direct = config.get_int("ALLOW_DIRECT_SUBMIT", 1) == 1
         # 提交序号基数：服务器把正确答案编码成 MD5(1..N)，说明内部序号从 1 开始，
         # 因此默认按 1 基提交。若实测显示该接口接受 0 基，把 SUBMIT_INDEX_BASE 设为 0。
@@ -65,22 +66,6 @@ class AnswerSubmitter:
             "quizId": question.get("quiz_id"),
             "answerIndex": self._submit_index(answer),
         }
-
-        if self.prefer_mcp and self.mcp:
-            try:
-                tool = config.get("CHARLES_MCP_SUBMIT_TOOL", "send_request")
-                result = self.mcp.call_tool(
-                    tool,
-                    {
-                        "method": "POST",
-                        "url": self.answer_url,
-                        "headers": (request_context or {}).get("headers", {}),
-                        "body": body,
-                    },
-                )
-                return {"transport": "charles_mcp", "body": result}
-            except Exception as exc:
-                logger.warning("Charles MCP 提交失败，准备按配置回退: %s", exc)
 
         if not self.allow_direct:
             return {
@@ -124,19 +109,18 @@ class AnswerSubmitter:
 
 
 class QuizAutomation:
-    """处理一条 Charles MCP 抓包并完成答案编排。"""
+    """处理一条抓包并完成答案编排。"""
 
     def __init__(
         self,
         store: QuizCaptureStore,
         local_resolver=None,
-        mcp: Optional[CharlesMcpClient] = None,
         progress: Optional[ProgressTracker] = None,
     ) -> None:
         # 答案路由：精确题库 -> 本地语义检索 -> LLM API。
         self.engine = HybridAnswerEngine(local_resolver=local_resolver)
         self.pipeline = CapturePipeline(store=store, answer_resolver=self.engine.resolve)
-        self.submitter = AnswerSubmitter(mcp=mcp)
+        self.submitter = AnswerSubmitter()
         self.store = store
         self.progress = progress or get_progress_tracker()
 
@@ -268,8 +252,7 @@ def main() -> None:
     """命令行模式：从 stdin 读取 JSON 抓包信封，每行处理一条。"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     store = QuizCaptureStore()
-    mcp = CharlesMcpClient() if config.get("CHARLES_MCP_URL") else None
-    automation = QuizAutomation(store=store, mcp=mcp)
+    automation = QuizAutomation(store=store)
     for line in os.sys.stdin:
         line = line.strip()
         if not line:

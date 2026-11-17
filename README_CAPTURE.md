@@ -103,11 +103,18 @@ LLM_TIMEOUT=30
 SUBMIT_INDEX_BASE=1
 ```
 
-`CHARLES_MCP_URL` 与 `CHARLES_MCP_SUBMIT_TOOL` 同样可写进 `.env`。
+`CHARLES_MCP_URL` 同样可写进 `.env`。
 真实环境变量优先于 `.env`，临时覆盖无需改文件。
 
 大模型只接 DeepSeek 官方一个平台（`LLM_API_BASE` 默认
 `https://api.deepseek.com/v1`）。
+
+## 抓包与提交的分工
+
+- **收题**：`charles_mcp_http.py` 把 Charles MCP 以 streamable-http 暴露在
+  `http://127.0.0.1:8931/mcp`，服务通过 `CHARLES_MCP_URL` 连接。这条路不需要 Agent。
+- **提交**：一律直连目标 API。`charles-mcp` 没有能凭空发出新请求的工具
+  （`reverse_replay_entry` 只能重放已有抓包条目），因此不存在 MCP 提交通道。
 
 每道题的 `answer_source` 会标记为：
 

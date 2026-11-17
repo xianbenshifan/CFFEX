@@ -292,13 +292,10 @@ def get_automation_runner():
     global _automation_runner
     if _automation_runner is None:
         from automation_runner import QuizAutomation
-        from charles_mcp_adapter import CharlesMcpClient
 
-        mcp = CharlesMcpClient() if config.get("CHARLES_MCP_URL") else None
         _automation_runner = QuizAutomation(
             store=_capture_store,
             local_resolver=search_answer,
-            mcp=mcp,
             progress=_progress,
         )
     return _automation_runner

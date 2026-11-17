@@ -41,14 +41,14 @@ def main():
     # 提交序号：本地 0 基索引要按 SUBMIT_INDEX_BASE 转换。
     import automation_runner
 
-    submitter = automation_runner.AnswerSubmitter(mcp=None)
+    submitter = automation_runner.AnswerSubmitter()
     assert submitter._submit_index({"answer_index": 0}) == 1
     assert submitter._submit_index({"answer_index": 2}) == 3
     assert submitter._submit_index({"answer": "B"}) == "B"
 
     os.environ["SUBMIT_INDEX_BASE"] = "0"
     try:
-        zero_base = automation_runner.AnswerSubmitter(mcp=None)
+        zero_base = automation_runner.AnswerSubmitter()
         assert zero_base._submit_index({"answer_index": 0}) == 0
         assert zero_base._submit_index({"answer_index": 2}) == 2
     finally:
