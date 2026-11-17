@@ -24,6 +24,20 @@ from progress_tracker import ProgressTracker, get_progress_tracker
 logger = logging.getLogger(__name__)
 
 
+def capture_ingest_source(envelope: Dict[str, Any]) -> str:
+    """决定这条抓包写入归档时的来源名。
+
+    Charles 链路不带 ingest_source，继续记为 charles_mcp_automation。
+    mitmproxy 插件会带上自己的来源名。
+    """
+    meta = envelope.get("metadata") if isinstance(envelope, dict) else None
+    if isinstance(meta, dict):
+        name = meta.get("ingest_source")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return "charles_mcp_automation"
+
+
 class AnswerSubmitter:
     """把答案提交到目标 API。
 
@@ -136,7 +150,7 @@ class QuizAutomation:
         """
         self.progress.start_run()
         self.progress.update("capture", "已收到抓包，正在解析题目")
-        current = self.pipeline.ingest(envelope, source="charles_mcp_automation")
+        current = self.pipeline.ingest(envelope, source=capture_ingest_source(envelope))
         first_result = current
 
         question = current.get("question")
