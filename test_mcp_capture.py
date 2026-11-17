@@ -88,6 +88,14 @@ def main():
     assert poller.set_interval("abc")["interval"] == 1.0
     print("   ok: 0.5 / 0→0.2 / 999→60 / abc→1.0")
 
+    print("=== 7. 慢轮询熔断阈值 ===")
+    assert poller.SLOW_POLL_LIMIT == 3
+    assert poller.SLOW_POLL_SECONDS == 3.0
+    assert poller.stats.get("tripped") is False
+    # 慢轮询计数只在连续超时时累加，正常轮询会归零
+    assert poller._slow_streak == 0
+    print("   ok: 连续 3 次超过 3 秒即熔断")
+
     print("mcp capture test passed")
 
 

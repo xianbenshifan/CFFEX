@@ -133,6 +133,10 @@ class McpCapturePoller:
 
     MIN_INTERVAL = 0.2
     MAX_INTERVAL = 60.0
+    # 连续多少次轮询超时就自动停掉收题，避免把 Charles 拖死
+    SLOW_POLL_LIMIT = 3
+    # 单次轮询超过这个秒数算"慢轮询"
+    SLOW_POLL_SECONDS = 3.0
 
     def __init__(self, handler=None, endpoint: Optional[str] = None) -> None:
         self.handler = handler
@@ -144,6 +148,7 @@ class McpCapturePoller:
         self._stop = threading.Event()
         # 间隔变化时唤醒等待，让新值立即生效
         self._wake = threading.Event()
+        self._slow_streak = 0
         self.stats: Dict[str, Any] = {
             "started_at": None,
             "polls": 0,
@@ -153,6 +158,8 @@ class McpCapturePoller:
             "last_error": None,
             "last_poll_at": None,
             "last_poll_duration": None,
+            "slow_polls": 0,
+            "tripped": False,
         }
 
     # ---- 间隔 ----
@@ -219,6 +226,8 @@ class McpCapturePoller:
         self.running = True
         self._stop.clear()
         self._wake.clear()
+        self._slow_streak = 0
+        self.stats["tripped"] = False
         self.stats["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         self._thread = threading.Thread(target=self._loop, daemon=True, name="mcp-capture-poller")
         self._thread.start()
@@ -277,13 +286,34 @@ class McpCapturePoller:
             started = time.time()
             try:
                 self._poll_once(client)
-                self.stats["last_poll_duration"] = round(time.time() - started, 3)
+                cost = time.time() - started
+                self.stats["last_poll_duration"] = round(cost, 3)
+                # 熔断：连续多次慢轮询说明 Charles 快撑不住了，主动停掉收题
+                if cost > self.SLOW_POLL_SECONDS:
+                    self._slow_streak += 1
+                    self.stats["slow_polls"] += 1
+                    logger.warning(
+                        "[收题] 本轮耗时 %.1fs 超过 %.0fs（连续 %d 次）",
+                        cost, self.SLOW_POLL_SECONDS, self._slow_streak,
+                    )
+                    if self._slow_streak >= self.SLOW_POLL_LIMIT:
+                        self.stats["tripped"] = True
+                        self.stats["last_error"] = (
+                            f"连续 {self._slow_streak} 次轮询超过 "
+                            f"{self.SLOW_POLL_SECONDS:.0f}s，已自动停止以保护 Charles"
+                        )
+                        logger.error("[收题] %s", self.stats["last_error"])
+                        self._stop.set()
+                        break
+                else:
+                    self._slow_streak = 0
             except Exception as exc:
                 self.stats["last_error"] = f"{type(exc).__name__}: {exc}"
                 logger.warning("[收题] 轮询失败: %s", exc)
             # 用可唤醒的等待代替 sleep：改间隔后立即按新值继续
             self._wake.wait(self._interval)
             self._wake.clear()
+        self.running = False
 
     def _poll_once(self, client) -> None:
         """拉一次增量并分发。"""
