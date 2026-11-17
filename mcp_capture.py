@@ -199,10 +199,18 @@ class McpCapturePoller:
         if not self.endpoint:
             return {"status": "disabled", "error": "未配置 CHARLES_MCP_URL"}
 
-        from charles_mcp_adapter import CharlesMcpClient
+        from charles_mcp_adapter import CharlesMcpClient, CharlesMcpError
 
         client = CharlesMcpClient(endpoint=self.endpoint, timeout=30)
-        result = client.start_capture(reset_session=True, adopt_existing=True)
+
+        # 上次异常退出时可能残留活动会话，MCP 会拒绝再开新的，先清掉。
+        self._close_leftover_capture(client)
+
+        try:
+            result = client.start_capture(reset_session=True, adopt_existing=True)
+        except CharlesMcpError as exc:
+            return {"status": "failed", "error": str(exc)}
+
         capture_id = (result or {}).get("capture_id") if isinstance(result, dict) else None
         if not capture_id:
             return {"status": "failed", "error": f"未拿到 capture_id: {result}"}
@@ -216,6 +224,28 @@ class McpCapturePoller:
         self._thread.start()
         logger.info("[收题] 已启动，capture_id=%s", capture_id)
         return {"status": "running", "capture_id": capture_id}
+
+    def _close_leftover_capture(self, client) -> None:
+        """关闭 MCP 里遗留的活动抓包会话。
+
+        MCP 同一时刻只允许一个活动会话；若上次进程被强杀，
+        会话会残留并导致新的 start_live_capture 直接报错。
+        """
+        try:
+            status = client.status()
+        except Exception as exc:
+            logger.warning("[收题] 无法读取 MCP 状态: %s", exc)
+            return
+
+        active = ((status or {}).get("live_capture") or {}).get("active_capture") or {}
+        leftover = active.get("capture_id")
+        if not leftover:
+            return
+        try:
+            client.stop_capture(str(leftover), persist=False)
+            logger.info("[收题] 已清理遗留会话 %s", leftover)
+        except Exception as exc:
+            logger.warning("[收题] 清理遗留会话失败: %s", exc)
 
     def stop(self) -> Dict[str, Any]:
         """停止轮询并关闭抓包会话。"""

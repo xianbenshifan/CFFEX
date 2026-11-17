@@ -107,6 +107,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 浏览器重试或代理递归时，werkzeug 的访问日志会瞬间刷爆；
+# 这里把它压到 WARNING，业务日志仍走 INFO。
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 # 确保日志处理器使用UTF-8编码
 for handler in logger.handlers:
     if hasattr(handler, 'stream') and hasattr(handler.stream, 'reconfigure'):
@@ -480,6 +484,90 @@ def receive_quiz_only(quiz_id: str):
         return jsonify({"status": "error", "message": str(e)}), 200  # 即使出错也返回200，不影响Charles
 
 
+# 同一路径的代理错误只记录一次，避免浏览器重试把日志刷爆
+_proxy_error_seen: dict = {}
+
+
+def _log_proxy_error_once(path: str, exc: Exception, exc_info: bool = False) -> None:
+    """同一路径的同类错误只记一条，之后静默累计。"""
+    key = (path, type(exc).__name__)
+    count = _proxy_error_seen.get(key, 0) + 1
+    _proxy_error_seen[key] = count
+    if count == 1:
+        logger.error("代理请求失败 (%s): %s", path, exc, exc_info=exc_info)
+    elif count in (10, 100, 1000, 10000):
+        logger.error("代理请求失败 (%s) 已累计 %d 次，后续不再记录", path, count)
+
+
+def _is_self_request(host_header: str) -> bool:
+    """判断请求是否是打到本服务自身。
+
+    系统代理指向 Charles 时，浏览器访问本机面板的请求会经 Charles 转回来，
+    Host 仍是本机的 IP:端口。此时若继续当代理目标转发，就会无限递归。
+    """
+    if not host_header:
+        return False
+    host = host_header.split(":")[0].strip().lower()
+    if not host:
+        return False
+
+    port = config.get_int("PROXY_PORT", 8889)
+    # Host 带端口且不是本服务端口时，说明是别的主机/服务
+    if ":" in host_header:
+        try:
+            if int(host_header.split(":")[-1]) != port:
+                return False
+        except ValueError:
+            pass
+
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"):
+        return True
+
+    # 本机各网卡地址
+    try:
+        import socket
+
+        local_names = {socket.gethostname().lower()}
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None):
+                local_names.add(str(info[4][0]).lower())
+        except OSError:
+            pass
+        # 通过 UDP 探测本机出站 IP
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("8.8.8.8", 80))
+            local_names.add(probe.getsockname()[0].lower())
+        except OSError:
+            pass
+        finally:
+            probe.close()
+        if host in local_names:
+            return True
+    except OSError:
+        pass
+
+    return False
+
+
+def _not_proxied_response(path: str):
+    """对打到自己身上的请求给出明确提示，而不是转发造成递归。"""
+    if path.endswith("favicon.ico"):
+        # 浏览器自动请求，直接 204 避免噪声
+        return "", 204
+    return (
+        jsonify(
+            {
+                "error": "refuse to proxy to self",
+                "message": "该请求的目标是本服务自身，已拒绝转发以避免无限递归。",
+                "hint": "把本机地址（如 192.168.x.x）加入代理例外，或在 Charles 中排除该域名。",
+                "path": path,
+            }
+        ),
+        508,
+    )
+
+
 # 注意：通配符路由必须放在最后，确保特定路由优先匹配
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'CONNECT'])
 @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'CONNECT'])
@@ -512,7 +600,18 @@ def proxy_all(path):
         
         # 判断目标服务器
         host_header = request.headers.get('Host', '')
-        
+
+        # 防自转发：系统代理指向 Charles 时，访问本服务的请求会被转回自己，
+        # 通配路由再把它当目标转发，形成无限递归。命中自身地址时直接拒绝。
+        if self_host := _is_self_request(host_header):
+            logger.warning(
+                "[防递归] 拒绝转发到本服务自身: Host=%s path=%s。"
+                "访问面板请把本机地址加入代理例外（不走 Charles）。",
+                host_header,
+                request.path,
+            )
+            return _not_proxied_response(request.path)
+
         # 如果Host是quiz-activity.eastmoney.com，转发到HTTPS
         if 'quiz-activity.eastmoney.com' in host_header:
             target_base = f"https://quiz-activity.eastmoney.com"
@@ -593,10 +692,10 @@ def proxy_all(path):
         )
         
     except requests.exceptions.RequestException as e:
-        logger.error(f"代理请求失败: {e}")
+        _log_proxy_error_once(path, e)
         return jsonify({"error": str(e)}), 500
     except Exception as e:
-        logger.error(f"代理请求异常: {e}", exc_info=True)
+        _log_proxy_error_once(path, e, exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -754,6 +853,12 @@ def list_captures():
     """读取最近抓包元数据。"""
     limit = request.args.get("limit", default=100, type=int)
     return jsonify({"success": True, "items": _capture_store.list_captures(limit)})
+
+
+@app.route('/favicon.ico', methods=['GET'])
+def favicon():
+    """浏览器自动请求的图标，返回空内容避免落到通配代理路由。"""
+    return "", 204
 
 
 @app.route('/system/status', methods=['GET'])
