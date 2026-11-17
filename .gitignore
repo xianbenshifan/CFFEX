@@ -11,6 +11,11 @@ hf_cache/
 # 运行日志
 log/
 
+# Charles 根证书与私钥，不入库
+mitmproxy-ca.pem
+mitmproxy-ca.p12
+certs/
+
 # 编辑器与本地状态
 .idea/
 .vscode/

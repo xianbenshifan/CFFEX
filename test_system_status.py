@@ -100,7 +100,7 @@ def main():
 
     print("=== 9b. 通道判定：必须是已知通道之一，并说明 stdio 限制 ===")
     channel = ss.check_capture_channel()
-    known = ("none", "http_mcp", "http_mcp_down")
+    known = ("none", "http_mcp", "http_mcp_down", "mitmproxy", "mitmproxy_down")
     assert channel["channel"] in known, channel
     assert "stdio" in channel["stdio_mcp_note"]
     # 配置了 URL 就必须给出真实探测结果，而不是仅凭配置断定可用
@@ -142,6 +142,25 @@ def main():
     )
     assert readiness["ready"] is False
     assert any("charles_mcp_http" in item for item in readiness["blockers"])
+    print("   blockers:", readiness["blockers"])
+
+    print("=== 14. 就绪判定：mitmproxy 在线时不要求 MCP ===")
+    readiness = ss.check_readiness(
+        online, {"state": "online", "message": "齐备"}, capture_with("mitmproxy")
+    )
+    assert readiness["ready"] is True
+    assert not any("MCP" in item or "charles_mcp" in item for item in readiness["blockers"])
+    print("   blockers:", readiness["blockers"])
+
+    print("=== 14b. 就绪判定：mitmproxy 没启动时只提示 start_mitm.bat ===")
+    readiness = ss.check_readiness(
+        online,
+        {"state": "online", "message": "齐备"},
+        {"state": "idle", "message": "测试", "channel": {"channel": "mitmproxy_down", "mitm_port": 8888}},
+    )
+    assert readiness["ready"] is False
+    assert any("start_mitm.bat" in item for item in readiness["blockers"])
+    assert not any("charles_mcp_http" in item for item in readiness["blockers"])
     print("   blockers:", readiness["blockers"])
 
     print("=== 15. 就绪判定：HTTP MCP 连通时不阻塞 ===")

@@ -7,7 +7,7 @@ Charles 那条轮询链路不经过这里。
 
 启动见 start_mitm.bat。单独运行插件：
 
-    mitmdump --listen-host 0.0.0.0 --listen-port 8080 ^
+    mitmdump --listen-host 0.0.0.0 --listen-port 8888 ^
         --allow-hosts quiz-activity\\.eastmoney\\.com -s mitm_capture.py
 """
 # -*- coding: utf-8 -*-

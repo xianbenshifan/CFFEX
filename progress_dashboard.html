@@ -84,6 +84,17 @@
     .agree.diff { border-color: #b45309; background: #2a1f0f; color: #fde68a; }
     .agree.wait { color: #64748b; }
     .hint { margin-top: 8px; font-size: 11.5px; color: #475569; }
+    .retry-btn {
+      margin-top: 8px;
+      border: 1px solid #94a3b8;
+      background: #fff;
+      color: #0f172a;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .retry-btn:disabled { opacity: 0.6; cursor: default; }
 
     /* 题目与选项 */
     .q-panel { background: #16213a; border: 1px solid #24304d; border-radius: 10px; padding: 15px 17px; }
@@ -198,6 +209,7 @@
       <div class="answer-picked" id="llm-picked"></div>
       <div class="answer-basis" id="llm-basis"></div>
       <div class="answer-note" id="llm-note"></div>
+      <button type="button" class="retry-btn" id="llm-retry" hidden>重新请求</button>
     </div>
   </div>
   <div class="agree" id="agree">等待题目…</div>
@@ -285,6 +297,8 @@
     pill($("capture-pill"), cap.state);
     const ch = cap.channel || {};
     const CHANNEL_TEXT = {
+      mitmproxy: "mitmproxy 正在收题",
+      mitmproxy_down: "mitmproxy 未启动",
       http_mcp: "HTTP MCP 已连通",
       http_mcp_down: "HTTP MCP 连不上",
       none: "无可用通道",
@@ -293,7 +307,7 @@
     const mcp = ch.http_mcp || {};
     meta($("capture-meta"), [
       ["通道", CHANNEL_TEXT[ch.channel] || ch.channel || "-"],
-      ["MCP 工具", mcp.reachable ? mcp.tool_count : "未连通"],
+      ["MCP", (ch.channel === "mitmproxy" || ch.channel === "mitmproxy_down") ? "不使用" : (mcp.reachable ? mcp.tool_count : "未连通")],
       ["Charles", cap.charles_running ? "在运行" : "未运行"],
       ["最近抓包", fmtIdle(cap.idle_seconds)],
     ]);
@@ -496,7 +510,9 @@
     const llmPending = llm.status === "pending";
     const showLlm = !llmPending && llm.status !== "failed" && !!llmLetter
       && (llm.status === "ready" || llm.status == null || llm.status === "");
-    $("llm-answer").textContent = showLlm ? llmLetter : (llm.status === "failed" ? "未返回" : "搜索中");
+    $("llm-answer").textContent = showLlm
+      ? llmLetter
+      : (llmPending ? "搜索中" : "未返回");
     $("llm-picked").textContent = showLlm && llmLetter
       ? `选中：${llm.answer_text || pickTexts(item.options, llmLetters) || "（未返回选项内容）"}`
       : "";
@@ -511,8 +527,24 @@
     }
     $("llm-basis").textContent = showLlm ? llmBasis : "";
     $("llm-note").textContent = showLlm ? (llm.explanation || "") : "";
-    $("llm-badge").textContent = showLlm ? "llm_api" : (llm.status === "failed" ? "" : "搜索中");
+    $("llm-badge").textContent = showLlm ? "llm_api" : (llmPending ? "搜索中" : "");
     $("llm-badge").className = "answer-badge";
+    const retry = $("llm-retry");
+    retry.hidden = showLlm || llm.status === "pending";
+    retry.disabled = false;
+    retry.onclick = () => {
+      if (!item.question_id) return;
+      retry.disabled = true;
+      retry.hidden = true;
+      $("llm-answer").textContent = "搜索中";
+      $("llm-badge").textContent = "搜索中";
+      fetch("/questions/" + encodeURIComponent(item.question_id) + "/llm/retry", {
+        method: "POST",
+      }).catch(() => {
+        retry.hidden = false;
+        retry.disabled = false;
+      });
+    };
 
     // 题库匹配到的原题（多选也高亮全部命中项）
     const panel = $("match-panel");
@@ -536,7 +568,7 @@
     } else if (showLlm && llmLetter) {
       agree.className = "agree diff";
       agree.textContent = `只有大模型给出答案：${llmLetter}（题库未命中）`;
-    } else if (!showLlm && llm.status !== "failed") {
+    } else if (llmPending) {
       agree.className = "agree wait";
       agree.textContent = bankLetter
         ? `题库 ${bankLetter}。大模型搜索中`
@@ -550,15 +582,16 @@
     }
   }
 
+  let latestSeq = 0;
+  let appliedSeq = 0;
+
   function loadLatestAnswer() {
-    const requestedId = activeQuestionId;
+    const seq = ++latestSeq;
     fetch("/automation/latest")
       .then(r => r.json())
       .then(d => {
-        if (!d.success || !d.item) return;
-        const id = String(d.item.question_id || "");
-        if (requestedId && id !== requestedId) return;
-        if (activeQuestionId && id !== activeQuestionId) return;
+        if (seq < appliedSeq || !d.success || !d.item) return;
+        appliedSeq = seq;
         renderAnswers(d.item);
       })
       .catch(() => {});

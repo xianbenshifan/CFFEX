@@ -5,7 +5,7 @@
 ## 启动
 
 Charles：双击 `start.bat`。
-mitmproxy：双击 `start_mitm.bat`。手机代理指向窗口里打印的地址（端口 8080），只解密答题域名。证书在 `%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.cer`。
+mitmproxy：双击 `start_mitm.bat`。代理端口与 Charles 相同，都是 `8888`，手机不用改端口。只解密答题域名，签发用的是手机里已经信任的 Charles 根证书。同一时刻只能开其中一套。
 
 两条路用同一个答题服务。窗口里会打印面板地址，形如 `http://<本机IP>:8889/dashboard`。
 

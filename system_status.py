@@ -163,15 +163,37 @@ def check_supporting_files(server: Any) -> Dict[str, Any]:
     return {"state": state, "message": message, "files": files}
 
 
+def mitm_ca_ready() -> bool:
+    """mitmproxy 是否已接上 Charles 根证书。接上之后收题不经过 MCP。"""
+    return (ROOT / "certs" / "mitmproxy-ca.pem").is_file()
+
+
+def mitmdump_running() -> bool:
+    """本机是否有 mitmdump 进程。没有 psutil 时无法判断，按未运行处理。"""
+    try:
+        import psutil
+    except ImportError:
+        return False
+    try:
+        for proc in psutil.process_iter(["name"]):
+            name = (proc.info.get("name") or "").lower()
+            if "mitmdump" in name or name.startswith("mitmproxy"):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def check_capture_channel() -> Dict[str, Any]:
     """判定当前实际生效的抓包通道。
 
-    stdio MCP 必须由 Agent 拉起子进程，独立工作流无法使用。
-    可用通道只有 charles_mcp_http.py 提供的 HTTP MCP。
+    已配置 Charles 根证书时，收题走 mitmproxy，不探测 MCP。
+    未配置时才使用 charles_mcp_http.py 提供的 HTTP MCP。
     配置了 CHARLES_MCP_URL 不代表能用，必须真实握手成功才算在线。
     """
     mcp_url = config.get("CHARLES_MCP_URL")
     http_mcp_configured = bool(mcp_url)
+    mitm_port = config.get_int("MITM_LISTEN_PORT", 8888)
     mcp_probe: Dict[str, Any] = {
         "configured": http_mcp_configured,
         "url": mcp_url,
@@ -179,34 +201,46 @@ def check_capture_channel() -> Dict[str, Any]:
         "tool_count": 0,
         "error": None,
     }
+    mitm_configured = mitm_ca_ready()
+    mitm_up = mitmdump_running() if mitm_configured else False
 
-    if http_mcp_configured:
-        try:
-            from charles_mcp_adapter import CharlesMcpClient
-
-            client = CharlesMcpClient(endpoint=mcp_url, timeout=8.0)
-            tools = client.list_tools()
-            mcp_probe["reachable"] = True
-            mcp_probe["tool_count"] = len(tools)
-        except Exception as exc:
-            mcp_probe["error"] = str(exc)[:200]
-
-    if mcp_probe["reachable"]:
-        channel = "http_mcp"
-        message = f"HTTP MCP 已连通（{mcp_probe['tool_count']} 个工具）：{mcp_url}"
-    elif http_mcp_configured:
-        channel = "http_mcp_down"
-        message = (
-            f"已配置 HTTP MCP 端点但连不上：{mcp_probe['error']}；"
-            "请先运行 charles_mcp_http.py"
-        )
+    if mitm_configured and mitm_up:
+        channel = "mitmproxy"
+        message = f"mitmproxy 正在监听 {mitm_port}，题目直接推给答题服务"
+    elif mitm_configured:
+        channel = "mitmproxy_down"
+        message = f"mitmproxy 没在监听 {mitm_port}：运行 start_mitm.bat"
     else:
-        channel = "none"
-        message = "没有抓包通道：未配置 CHARLES_MCP_URL"
+        if http_mcp_configured:
+            try:
+                from charles_mcp_adapter import CharlesMcpClient
+
+                client = CharlesMcpClient(endpoint=mcp_url, timeout=8.0)
+                tools = client.list_tools()
+                mcp_probe["reachable"] = True
+                mcp_probe["tool_count"] = len(tools)
+            except Exception as exc:
+                mcp_probe["error"] = str(exc)[:200]
+
+        if mcp_probe["reachable"]:
+            channel = "http_mcp"
+            message = f"HTTP MCP 已连通（{mcp_probe['tool_count']} 个工具）：{mcp_url}"
+        elif http_mcp_configured:
+            channel = "http_mcp_down"
+            message = (
+                f"已配置 HTTP MCP 端点但连不上：{mcp_probe['error']}；"
+                "请先运行 charles_mcp_http.py"
+            )
+        else:
+            channel = "none"
+            message = "没有抓包通道：未配置 CHARLES_MCP_URL"
 
     return {
         "channel": channel,
         "message": message,
+        "mitm_configured": mitm_configured,
+        "mitm_running": mitm_up,
+        "mitm_port": mitm_port,
         "http_mcp_configured": http_mcp_configured,
         "http_mcp_url": mcp_url,
         "http_mcp": mcp_probe,
@@ -309,6 +343,9 @@ def check_readiness(bank: Dict[str, Any], files: Dict[str, Any], capture: Dict[s
     channel_kind = channel.get("channel")
     if channel_kind == "none":
         blockers.append("没有可用的抓包通道：题目无法进入，自动答题不会启动")
+    elif channel_kind == "mitmproxy_down":
+        port = (channel.get("mitm_port") if isinstance(channel, dict) else None) or 8888
+        blockers.append(f"mitmproxy 没在监听 {port}：运行 start_mitm.bat，否则收不到题目")
     elif channel_kind == "http_mcp_down":
         blockers.append("HTTP MCP 端点连不上：先运行 charles_mcp_http.py，否则收不到题目")
     elif capture["state"] in ("offline", "unknown"):

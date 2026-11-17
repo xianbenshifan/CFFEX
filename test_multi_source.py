@@ -6,7 +6,7 @@ import tempfile
 
 from capture_pipeline import CapturePipeline
 from capture_store import QuizCaptureStore
-from hybrid_answer import HybridAnswerEngine
+from hybrid_answer import HybridAnswerEngine, normalize_llm_answer
 from markdown_export import export_markdown
 
 
@@ -27,8 +27,52 @@ class FakeEngine:
         }
 
 
+def check_multi_choice_guard():
+    """多选题只返回一个字母时不采用，并再请求一次。"""
+    options = ["甲", "乙", "丙", "丁"]
+    assert normalize_llm_answer("A", options, "M") is None
+    assert normalize_llm_answer("C,A", options, "M") == "AC"
+    assert normalize_llm_answer("A", options, "S") == "A"
+    assert normalize_llm_answer("AE", options, "M") is None
+
+    engine = HybridAnswerEngine(database_path="database.json")
+    engine.llm_api_key = "test"
+    calls = []
+
+    def fake_request(prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return {"answer": "B", "confidence": 0.9}
+        return {"answer": "BD", "confidence": 0.8}
+
+    engine._request_llm = fake_request
+    found = engine._resolve_with_llm("多选题干", options, "M")
+    assert found["answer"] == "BD", found
+    assert found["answer_index"] is None
+    assert len(calls) == 2
+    assert "至少两个" in calls[0]
+
+    calls.clear()
+
+    def still_single(prompt):
+        calls.append(prompt)
+        return {"answer": "A", "confidence": 0.9}
+
+    engine._request_llm = still_single
+    assert engine._resolve_with_llm("多选题干", options, "M") is None
+    assert len(calls) == 2
+
+    calls.clear()
+    engine._request_llm = fake_request
+    single = engine._resolve_with_llm("单选题干", options, "S")
+    assert single["answer"] == "B"
+    assert len(calls) == 1
+    print("   多选少于两个字母会被拒绝并重试")
+
+
 def main():
     """验证两个来源分别入库与渲染。"""
+    check_multi_choice_guard()
 
     print("=== 1. 题库与大模型都命中且一致 ===")
     with tempfile.TemporaryDirectory() as folder:

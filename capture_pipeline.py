@@ -310,14 +310,22 @@ class CapturePipeline:
             prior and prior.get("llm_status") == "pending"
         ):
             self.store.set_llm_status(question_id, "pending")
-            self._schedule_llm(question_id, question_text, options)
+            self._schedule_llm(question_id, question_text, options, result.get("type"))
         return result
 
-    def _schedule_llm(self, question_id: str, question_text: str, options: Any) -> None:
+    def _schedule_llm(
+        self,
+        question_id: str,
+        question_text: str,
+        options: Any,
+        question_type: Any = None,
+    ) -> None:
         """题目先入库。大模型返回后再补上答案，不挡住面板。"""
 
         def run() -> None:
             try:
+                found = self.llm_resolver(question_text, options, question_type)
+            except TypeError:
                 found = self.llm_resolver(question_text, options)
             except Exception:
                 logger.exception("大模型补答失败: question_id=%s", question_id)

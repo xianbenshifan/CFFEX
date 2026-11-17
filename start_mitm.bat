@@ -51,9 +51,16 @@ if "%MITMDUMP%"=="" (
     exit /b 1
 )
 
-for /f "usebackq delims=" %%P in (`python -c "import config; print(config.get('MITM_LISTEN_PORT','8080'))"`) do set MITM_PORT=%%P
+for /f "usebackq delims=" %%P in (`python -c "import config; print(config.get('MITM_LISTEN_PORT','8888'))"`) do set MITM_PORT=%%P
 for /f "usebackq delims=" %%H in (`python -c "import config; print(config.get('MITM_ALLOW_HOSTS','quiz-activity\\.eastmoney\\.com'))"`) do set MITM_HOSTS=%%H
-if "%MITM_PORT%"=="" set MITM_PORT=8080
+if "%MITM_PORT%"=="" set MITM_PORT=8888
+
+if not exist "certs\mitmproxy-ca.pem" (
+    echo [ERROR] certs\mitmproxy-ca.pem is missing.
+    echo         This file is the Charles root certificate plus its private key.
+    pause
+    exit /b 1
+)
 
 echo [1/3] Freeing mitmproxy port %MITM_PORT% ...
 for /f "tokens=5" %%A in ('netstat -ano ^| findstr ":%MITM_PORT%" ^| findstr "LISTENING"') do (
@@ -88,7 +95,7 @@ if !READY!==0 (
     exit /b 1
 )
 
-start "CFFEX-MITM" /min cmd /c ""%MITMDUMP%" --listen-host 0.0.0.0 --listen-port %MITM_PORT% --allow-hosts "%MITM_HOSTS%" -s "%CD%\mitm_capture.py""
+start "CFFEX-MITM" /min cmd /c ""%MITMDUMP%" --listen-host 0.0.0.0 --listen-port %MITM_PORT% --set confdir=%CD%\certs --allow-hosts "%MITM_HOSTS%" -s "%CD%\mitm_capture.py""
 
 set MITM_READY=0
 for /l %%i in (1,1,20) do (
@@ -113,11 +120,11 @@ echo ============================================================
 echo   READY
 echo ============================================================
 echo   Phone proxy : %LOCAL_IP%:%MITM_PORT%
-echo   Certificate : %USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.cer
+echo   Certificate : Charles root already on the phone
 echo   Dashboard   : http://%LOCAL_IP%:8889/dashboard
 echo   Only host   : %MITM_HOSTS%
 echo ============================================================
-echo   Install that certificate on the phone and trust it.
+echo   Do not install a new certificate.
 echo   Point the phone Wi-Fi proxy at the address above.
 echo   Charles is not started by this script.
 echo ============================================================

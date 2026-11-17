@@ -30,6 +30,35 @@ def answer_letters(answer: Any) -> str:
     return "".join(sorted({ch for ch in str(answer or "").upper() if "A" <= ch <= "Z"}))
 
 
+def is_multi_choice(question_type: Any) -> bool:
+    """题型 M 是多选。接口里单选是 S，判断是 J。"""
+    text = str(question_type or "").strip()
+    return text.upper() == "M" or "多选" in text
+
+
+def option_count(options: Any) -> int:
+    """选项个数。用来丢掉超出选项范围的字母。"""
+    if isinstance(options, (list, dict)):
+        return len(options)
+    return 0
+
+
+def normalize_llm_answer(raw: Any, options: Any, question_type: Any = None) -> Optional[str]:
+    """把大模型的答案收成字母串。
+
+    多选题少于两个字母时返回 None，避免把多选显示成单选。
+    """
+    letters = [ch for ch in answer_letters(raw)]
+    count = option_count(options)
+    if count:
+        letters = [ch for ch in letters if ord(ch) - ord("A") < count]
+    if is_multi_choice(question_type) and len(letters) < 2:
+        return None
+    if not letters:
+        return None
+    return "".join(letters)
+
+
 def answer_index(answer: Any, options: Any) -> Optional[int]:
     """把答案字母转换为选项索引。"""
     value = str(answer or "").strip().upper()
@@ -361,24 +390,88 @@ class HybridAnswerEngine:
         self,
         question_text: str,
         options: Any,
+        question_type: Any = None,
     ) -> Optional[Dict[str, Any]]:
-        """调用 OpenAI-compatible API，并强制要求 JSON 输出。"""
+        """调用 OpenAI-compatible API，并强制要求 JSON 输出。
+
+        多选题若只返回一个字母，再请求一次。第二次仍不是多个字母就放弃，
+        不把多选显示成单选。
+        """
         if not self.llm_api_key:
             logger.warning(
                 "未设置 DEEPSEEK_API_KEY，跳过 llm_api 兜底；"
                 "其余答案路由不受影响。"
             )
             return None
+        multi = is_multi_choice(question_type)
+        prompts = [self._llm_prompt(question_text, options, question_type)]
+        if multi:
+            prompts.append(
+                prompts[0]
+                + "\n上一次如果只给了一个字母，那是无效答案。"
+                + "本题是多选题，answer 必须是至少两个字母，例如 ABD。"
+            )
+        started = time.time()
+        result = None
+        letters = None
+        for attempt, prompt in enumerate(prompts, start=1):
+            result = self._request_llm(prompt)
+            if not result:
+                continue
+            letters = normalize_llm_answer(result.get("answer"), options, question_type)
+            if letters:
+                break
+            if multi and attempt == 1:
+                logger.info("[LLM] 多选题只返回了一个选项，重新请求")
+        if not result or not letters:
+            if multi:
+                logger.info("[LLM] 多选题没有给出多个选项，本题不采用大模型答案")
+            return None
+
+        result["answer"] = letters
+        # 序号以字母为准。模型常同时给出正确字母和错误的 answer_index，
+        # 保留后者会让面板点到另一个选项。
+        if len(letters) == 1:
+            derived = answer_index(result["answer"], options)
+            if derived is not None:
+                result["answer_index"] = derived
+            elif not options:
+                result["answer_index"] = ord(letters[0]) - ord("A")
+            else:
+                result["answer_index"] = None
+        else:
+            result["answer_index"] = None
+
+        result["answer_source"] = "llm_api"
+        result["similarity"] = float(result.get("confidence") or 0)
+        result["elapsed"] = round(time.time() - started, 2)
+        return result
+
+    def _llm_prompt(self, question_text: str, options: Any, question_type: Any) -> str:
+        """按题型写提示。多选的示例必须是多个字母，避免模型照着单选示例作答。"""
         option_text = self._format_options(options)
-        prompt = (
+        if is_multi_choice(question_type):
+            rule = (
+                "本题是多选题。answer 必须包含至少两个正确选项的字母，"
+                "按字母升序连写，例如 ABD。只填一个字母视为错误。"
+                "answer_index 固定为 null。"
+            )
+            example = '{"answer":"ABD","answer_index":null,"explanation":"...","confidence":0.0}'
+        else:
+            rule = (
+                "本题是单选题或判断题。answer 只填一个字母。"
+                "answer_index 填该字母对应的、从 0 开始的序号。"
+            )
+            example = '{"answer":"A","answer_index":0,"explanation":"...","confidence":0.0}'
+        return (
             "请分析下面的选择题，只返回 JSON，不要返回 Markdown。\n"
-            "规则：\n"
-            "1. 单选题只填一个字母；多选题把所有正确项的字母连写，按字母升序，"
-            "例如 ABD，不要加逗号或空格。\n"
-            "2. answer_index 仅在单选题时填 0 开始的序号，多选题固定填 null。\n"
-            '3. 返回格式：{"answer":"A","answer_index":0,"explanation":"...","confidence":0.0}\n'
+            f"规则：{rule}\n"
+            f"返回格式：{example}\n"
             f"\n题目：{question_text}\n选项：{option_text}"
         )
+
+    def _request_llm(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """请求一次大模型并解析 JSON。失败时返回 None。"""
         headers = {"Content-Type": "application/json"}
         if self.llm_api_key:
             headers["Authorization"] = f"Bearer {self.llm_api_key}"
@@ -388,7 +481,7 @@ class HybridAnswerEngine:
             "messages": [
                 {
                     "role": "system",
-                    "content": "你是题目解析服务，必须依据题干和选项给出答案与简短解析。",
+                    "content": "你是题目解析服务，必须依据题干和选项给出答案与简短解析。多选题必须返回多个选项。",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -404,43 +497,14 @@ class HybridAnswerEngine:
                 f"{self.llm_api_base}/chat/completions",
                 json=payload,
                 headers=headers,
-                # 硬上限：超过这个时间就不再等，直接放弃大模型侧。
                 timeout=config.get_float("LLM_TIMEOUT", 8.0),
             )
             response.raise_for_status()
-            body = response.json()
             elapsed = time.time() - started
             budget = config.get_float("LLM_TIMEOUT", 8.0)
             logger.info("[LLM] 用时 %.2fs（预算 %.0fs）", elapsed, budget)
-            content = body["choices"][0]["message"]["content"]
-            result = self._parse_json(content)
-            if not result.get("answer"):
-                return None
-
-            # 归一化答案：大写、只保留字母、去重并按字母升序，多选因此稳定成 ABD 形式
-            raw_answer = str(result.get("answer") or "")
-            letters = sorted({ch for ch in raw_answer.upper() if "A" <= ch <= "Z"})
-            if not letters:
-                return None
-            result["answer"] = "".join(letters)
-
-            # 序号以字母为准。模型常同时给出正确字母和错误的 answer_index，
-            # 保留后者会让面板点到另一个选项。
-            if len(letters) == 1:
-                derived = answer_index(result["answer"], options)
-                if derived is not None:
-                    result["answer_index"] = derived
-                elif not options:
-                    result["answer_index"] = ord(letters[0]) - ord("A")
-                else:
-                    result["answer_index"] = None
-            else:
-                result["answer_index"] = None
-
-            result["answer_source"] = "llm_api"
-            result["similarity"] = float(result.get("confidence") or 0)
-            result["elapsed"] = round(elapsed, 2)
-            return result
+            content = response.json()["choices"][0]["message"]["content"]
+            return self._parse_json(content)
         except requests.Timeout:
             logger.warning(
                 "LLM 超过 %.0fs 未返回，本题只保留题库侧答案",

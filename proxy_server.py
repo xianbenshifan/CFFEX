@@ -874,6 +874,21 @@ def _options_list(raw: Any) -> List[Dict[str, str]]:
     return items
 
 
+@app.route('/questions/<question_id>/llm/retry', methods=['POST'])
+def retry_llm(question_id: str):
+    """对这一题重新请求大模型。失败后由面板按钮触发。"""
+    item = _capture_store.get_question(question_id)
+    if item is None:
+        return jsonify({"success": False, "error": "题目不存在"}), 404
+    pipeline = get_automation_runner().pipeline
+    if pipeline.llm_resolver is None:
+        return jsonify({"success": False, "error": "大模型未配置"}), 503
+    _capture_store.set_llm_status(question_id, "pending")
+    question_text = item.get("question_text") or item.get("question_title") or ""
+    pipeline._schedule_llm(question_id, question_text, item.get("options"))
+    return jsonify({"success": True, "question_id": question_id, "llm_status": "pending"})
+
+
 @app.route('/automation/latest', methods=['GET'])
 def automation_latest():
     """返回最近一道题的完整呈现数据：题干、选项、两个来源的答案及其选项内容。"""

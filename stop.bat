@@ -11,7 +11,7 @@ echo ============================================================
 echo.
 
 set FOUND=0
-for %%P in (8889 8931 8080) do (
+for %%P in (8889 8931 8888 8080) do (
     for /f "tokens=5" %%A in ('netstat -ano ^| findstr ":%%P" ^| findstr "LISTENING"') do (
         echo   Stopping PID %%A on port %%P ...
         taskkill /F /PID %%A >nul 2>nul
